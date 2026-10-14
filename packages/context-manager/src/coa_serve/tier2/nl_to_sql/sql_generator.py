@@ -208,8 +208,26 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
 
 _SHARED_RULES = (
     "- Use ONLY the tables and columns provided in the schema — NEVER invent names\n"
+    # Company names: always a case-insensitive substring match, never equality.
+    # Placed second so it is read before anything else about filtering.
+    # A 'Resolved entities' section (_entities_block) takes precedence: it carries the
+    # full resolved name, which the user's words ("TCS") may not substring-match. This
+    # rule is the fallback for when entity resolution is skipped (no entity index,
+    # SERVE_ENTITY_RESOLUTION=off, or a fail-open error).
+    "- COMPANY NAME FILTERS: if the prompt has a 'Resolved entities' section, use exactly "
+    "the company filters it gives and do not rebuild them from the user's words. Otherwise, "
+    "whenever you filter on a column named company_name, in any "
+    "table, write LOWER(company_name) LIKE '%<name>%'. NEVER write company_name = '...' "
+    "and never compare company_name with = or IN, even when the user gives the full "
+    "official name. Build <name> from the user's words: lower-case it, drop a trailing "
+    "corporate suffix (ltd, limited, pvt, private, inc, corp, corporation, co) and double "
+    "any single quote. Never build it from a generic word alone (company, group, holdings, "
+    "enterprises, india, indian). For several companies, OR one LIKE per company inside "
+    "parentheses. Examples: 'Bajaj Auto Limited' -> LOWER(company_name) LIKE '%bajaj auto%'; "
+    "'grindwell' -> LOWER(company_name) LIKE '%grindwell%'\n"
     "- When a column lists 'allowed values: [...]', filter it using one of those "
-    "exact literals (matching case); do not alter case or invent a value\n"
+    "exact literals (matching case); do not alter case or invent a value. This does "
+    "not apply to company_name, which always uses the LIKE rule above\n"
     "- Use the FK relationship comments (-- FK: ...) to construct correct JOINs\n"
     "- Use table aliases for readability in multi-table queries\n"
     "- Handle potential NULLs with COALESCE where aggregation results could be empty\n"
@@ -236,75 +254,7 @@ _SHARED_RULES = (
     "repeat across joined rows\n"
     "- Return the SQL in a ```sql code block\n"
     "- After the query, rate your confidence (0.0-1.0) that this query "
-    "correctly answers the question"
-    "- For column name: company_name, always do lower(company_name) like lower('%<value>%'), never ="
-)
-
-# Entity-resolution conventions ported from coa-port/rules/02-entity-metric-period.md.
-# Source rule ids are in the comments; coa-port/entity-rules-accounting.md records
-# where all 72 entity rules went, including the 53 that have no home here.
-#
-# Only rules that change the SQL TEXT are here. The cascade the rest of them
-# describe — session memory, an acronym index, token-subset uniqueness, a Chroma
-# vector index, fuzzy tiers with score thresholds, a candidate pool, clarification
-# ask-backs — has no counterpart in COA, which resolves entities by retrieval. A
-# model writing a WHERE clause cannot run those tiers, so stating them here would
-# add tokens and change nothing.
-#
-# Every rule is phrased CONDITIONALLY on a table or column being present in the
-# retrieved schema. _build_system_prompt takes only a dialect, so this block is
-# injected for EVERY namespace and EVERY data source; a rule naming `cd_sector` or
-# `flag` outright would be asserted while answering questions about data that has
-# neither. Keep that property when editing: each line must read as a no-op when the
-# schema does not match it.
-_ENTITY_RULES = (
-    "\nENTITY RESOLUTION (apply only where the retrieved schema has the tables "
-    "and columns described):\n"
-    # ENT-014: ~8,196 master rows vs ~2,851 with data.
-    "- When a company master table (one row per company) sits alongside a periodic "
-    "facts table, counting or listing companies from the master table alone "
-    "overstates the answer, because it includes delisted, retired and never-filed "
-    "companies. Restrict to companies holding at least one row in the facts table\n"
-    # ENT-017: ticker == company_id; the dataset has no ticker column.
-    "- Where the schema has no ticker column, a stock symbol is the company "
-    "identifier itself. Never introduce a ticker column\n"
-    # ENT-064, ENT-066: exact match is definitive; a suffix-less name is still exact.
-    "- Identify a company by exact equality on its full name or identifier whenever "
-    "the question gives enough to do so. A name typed without its corporate suffix "
-    "('Laurus Labs' for 'Laurus Labs Ltd.') is still an exact reference: compare "
-    "with the suffix removed rather than falling back to a partial match\n"
-    # ENT-027, ENT-029: suffix tokens and punctuation carry no identity.
-    "- Corporate suffixes carry no identity (ltd, limited, inc, incorporated, corp, "
-    "corporation, co, pvt, private, merged), and neither does punctuation\n"
-    # ENT-031: generic tokens are not a distinctive identity.
-    "- These words are not an identity on their own: company, companies, group, "
-    "holdings, enterprises, india, indian. A name filter that matches only one of "
-    "them matches unrelated companies\n"
-    # ENT-075 (retired tier), ENT-068 (prefix rule: >= 4 chars).
-    "- Never match a company with an unanchored LIKE '%...%': short substrings match "
-    "unrelated companies. Where a prefix match is unavoidable, anchor it "
-    "(LIKE 'abcd%') and use at least four characters\n"
-    # ENT-074, ENT-103: no low-confidence fallback, no junk substitutes.
-    "- If the question names a company or sector you cannot find in the retrieved "
-    "schema, do not substitute the nearest similar value. Write the query the "
-    "question actually asks for and let it return no rows\n"
-    # ENT-033: cd_sector is the resolution target, cd_subsector is not.
-    "- A question about an industry, sector or segment filters the SECTOR column, "
-    "not a sub-sector column, when the schema has both\n"
-    # ENT-093, ENT-092: exact case-insensitive match on the trimmed value.
-    "- Match a sector or category name case-insensitively against the trimmed column "
-    "value, and use one of the 'allowed values' literals when the schema lists them. "
-    "An empty or whitespace-only term is not a filter\n"
-    # ENT-038, ENT-039, ENT-060: a sector scope stays a sector filter.
-    "- A question naming an industry is a sector-level question: filter on the sector "
-    "column, do not also filter by company, and do not enumerate that sector's "
-    "member companies first\n"
-    # ENT-046: whole-universe questions take no entity filter.
-    "- A question naming no company and no sector covers the whole universe: add no "
-    "entity filter to it\n"
-    # ENT-061: de-duplicate resolved entities.
-    "- Never return the same company or sector twice; use DISTINCT where a join "
-    "could repeat them\n"
+    "correctly answers the question\n"
 )
 
 _EXAMPLE_SCHEMA = (
@@ -327,6 +277,18 @@ _EXAMPLE_SCHEMA = (
 )
 
 
+def _entities_block(entities: str) -> str:
+    """Prompt section for entities resolved by the Tier-2 entity resolver.
+
+    Unlike ``evidence`` (free text from the caller, untrusted), this is produced
+    by the pipeline from the sectors table, so the writer must filter on exactly
+    these entities rather than re-deriving a pattern from the user's words.
+    """
+    if not entities:
+        return ""
+    return f"\n## Resolved entities (authoritative)\n{entities}\n"
+
+
 def _build_system_prompt(dialect: str) -> str:
     """Build the system prompt for the given SQL dialect."""
     config = _DIALECT_CONFIGS.get(dialect, _DIALECT_CONFIGS["athena"])
@@ -334,8 +296,7 @@ def _build_system_prompt(dialect: str) -> str:
         f"You are a SQL query generator for a data warehouse running on "
         f"{config['engine_description']}.\n\n"
         f"CRITICAL RULES:\n"
-        f"{_SHARED_RULES}\n"
-        f"{_ENTITY_RULES}"
+        f"{_SHARED_RULES}"
         f"{config['syntax_rules']}\n\n"
         f"Example:\n\n"
         f"Schema:\n{_EXAMPLE_SCHEMA}\n\n"
@@ -488,6 +449,7 @@ class SQLGenerator:
         dialect: str | None = None,
         graph_expander: GraphExpander | None = None,
         governed_metric: str = "",
+        entities: str = "",
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -514,6 +476,8 @@ class SQLGenerator:
                 Tier-1 matched but declined (see
                 ``DeclinedMetricContext.prompt_block``). Empty — the default —
                 leaves the prompt byte-identical to the pre-change baseline.
+            entities: Companies/sectors resolved by the Tier-2 entity resolver,
+                rendered as an authoritative prompt section. Empty → no section.
         """
         trace: list[dict[str, Any]] = []
 
@@ -711,7 +675,13 @@ class SQLGenerator:
         start = time.perf_counter()
         try:
             sql, confidence = await self._generate_sql(
-                question, ddl_context, evidence, model_id=model_id, dialect=dialect, governed_metric=governed_metric
+                question,
+                ddl_context,
+                evidence,
+                model_id=model_id,
+                dialect=dialect,
+                governed_metric=governed_metric,
+                entities=entities,
             )
             trace.append({"step": "generate_sql", "status": "ok", "ms": _ms(start), "confidence": confidence})
         except Exception as e:
@@ -791,6 +761,7 @@ class SQLGenerator:
         evidence: str = "",
         model_id: str | None = None,
         governed_metric: str = "",
+        entities: str = "",
     ) -> tuple[str, float]:
         """LLM-driven repair of a SQL statement that failed to execute.
 
@@ -829,6 +800,7 @@ class SQLGenerator:
         prompt = (
             f"## Database Schema (relevant tables)\n```sql\n{ddl_context}\n```\n"
             f"{governed_metric_block}"
+            f"{_entities_block(entities)}"
             f"{evidence_block}"
             f"\n## Question\n{question}\n\n"
             f"## Previous attempt (FAILED)\n```sql\n{failed_sql}\n```\n"
@@ -878,6 +850,7 @@ class SQLGenerator:
         dialect: str | None = None,
         feedback: str = "",
         governed_metric: str = "",
+        entities: str = "",
     ) -> tuple[str, float]:
         """Call LLM to generate SQL from question and DDL context.
 
@@ -898,6 +871,7 @@ class SQLGenerator:
                 which is labelled untrusted user input and truncated to 500
                 chars. Given, the writer extends the governed formula instead of
                 reinventing one.
+            entities: Resolved companies/sectors (see :func:`_entities_block`).
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -940,6 +914,7 @@ class SQLGenerator:
         prompt = (
             f"## Database Schema (relevant tables)\n```sql\n{ddl_context}\n```\n"
             f"{governed_metric_block}"
+            f"{_entities_block(entities)}"
             f"{evidence_block}"
             f"{feedback_block}\n"
             "Return the SQL in a ```sql code block.\n"

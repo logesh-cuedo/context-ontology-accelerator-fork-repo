@@ -47,6 +47,10 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand=$SCL_NL2SQL_GRAPH_EXPAND"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand_max_tables=$SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
+# Opt-in AOSS write access to the entity indexes (scripts/index_entities.py).
+[ -n "${SCL_AOSS_WRITER_ARNS:-}" ] && CONTEXT="$CONTEXT --context aoss_writer_principal_arns=$SCL_AOSS_WRITER_ARNS"
+# OpenSearch Serverless OCU floor (default 2). 0 lets an idle dev collection scale to zero.
+[ -n "${SCL_AOSS_MIN_OCU:-}" ] && CONTEXT="$CONTEXT --context aoss_min_ocu=$SCL_AOSS_MIN_OCU"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when

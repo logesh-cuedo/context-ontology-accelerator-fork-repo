@@ -54,6 +54,7 @@ from .session_metadata import SessionMetadataStore
 from .sse_emitter import SSEEmitter
 from .step_ids import StepId
 from .tier1.metric_resolver import MetricResolver
+from .tier2.entity_resolution import EntityResolver
 from .tier2.nl_to_sql.agentic_strategy import AgenticStrategy
 from .tier2.nl_to_sql.sql_generator import SQLGenerator
 from .tier2.nl_to_sql.strategy import NLtoSQLStrategy
@@ -407,6 +408,21 @@ async def _ensure_initialized():
                 oss_ontology_index=oss_ontology_index,
             )
 
+        # Tier-2 entity resolution: similarity search over the namespace's
+        # company/sector index (built by scripts/index_entities.py) + an LLM pick.
+        # A namespace with no index resolves to "skipped" — no behavior change.
+        # SERVE_ENTITY_RESOLUTION=off removes the step (and its LLM call) entirely.
+        entity_resolver = (
+            EntityResolver(
+                vector_client=opensearch_client,
+                llm_client=bedrock_client,
+                index_prefix=oss_ontology_index,
+                top_k_companies=int(os.environ.get("SERVE_ENTITY_TOP_K_COMPANIES", "10")),
+                top_k_sectors=int(os.environ.get("SERVE_ENTITY_TOP_K_SECTORS", "5")),
+            )
+            if oss_ontology_index and os.environ.get("SERVE_ENTITY_RESOLUTION", "on").lower() != "off"
+            else None
+        )
         _orchestrator = Orchestrator(
             metric_resolver=metric_resolver,
             knowledge_retriever=knowledge_retriever,
@@ -429,6 +445,7 @@ async def _ensure_initialized():
             agentic_retriever=agentic_retriever,
             tier3_deep_reasoning_default=(config.tier3_strategy == "deep-reasoning"),
             tier1_metric_timeout_s=config.tier1_metric_timeout_s,
+            entity_resolver=entity_resolver,
         )
         _config = config
         logger.info(

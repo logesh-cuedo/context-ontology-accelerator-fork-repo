@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 import boto3
 import structlog
 from coa_common import async_boto_config
-from coa_common.constants import graphrag_index_names
+from coa_common.constants import entity_vector_index_name, graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
 from coa_common.opensearch import AossVectorClient
 
@@ -299,6 +299,29 @@ def teardown_vkg_service(namespace_id: str) -> None:
             namespace_id=namespace_id,
             error_type=type(e).__name__,
         )
+
+
+def delete_entity_index(namespace_id: str) -> bool:
+    """Delete the namespace's Tier-2 entity index. Returns True if it existed.
+
+    The index (``{collection}-entities-{namespace}``) is written by
+    ``packages/context-manager/scripts/index_entities.py`` from the namespace's
+    sectors table and is namespace-scoped, so it becomes garbage exactly when the
+    namespace goes away. Idempotent; raises on a real failure for the same reason
+    :func:`delete_graphrag_indexes` does.
+    """
+    endpoint = os.environ.get("OSS_ENDPOINT", "")
+    collection = os.environ.get("OSS_COLLECTION_NAME", "")
+    if not endpoint or not collection:
+        logger.warning("entity_index_cleanup_not_configured", namespace_id=namespace_id)
+        return False
+
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = AossVectorClient(endpoint=endpoint, region=region, dimensions=1024, timeout=60)
+    index = entity_vector_index_name(collection, namespace_id)
+    removed = client.delete_index(index)
+    logger.info("entity_index_deleted", namespace_id=namespace_id, index=index, removed=removed)
+    return removed
 
 
 def delete_graphrag_indexes(namespace_id: str) -> list[str]:

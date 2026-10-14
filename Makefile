@@ -1,4 +1,4 @@
-.PHONY: setup generate format lint test test-unit test-integ build load-test load-test-slow load-test-teardown deploy-dev deploy-serve deploy-example-connector deploy-databricks-connector destroy-dev preflight docs web-dev vkg-dev version version-check
+.PHONY: setup generate format lint test test-unit test-integ build load-test load-test-slow load-test-teardown deploy-dev deploy-serve deploy-example-connector deploy-databricks-connector destroy-dev dev-sleep dev-wake dev-status preflight docs web-dev vkg-dev version version-check
 
 setup: generate
 	./scripts/setup-dev.sh
@@ -116,6 +116,21 @@ deploy-example-connector:
 ## namespace.
 deploy-databricks-connector:
 	./scripts/deploy-managed-databricks-connector.sh dev
+
+## Pause a dev environment overnight without destroying it: scale the ontology and
+## VKG ECS services to 0 and stop Neptune. No data loss, no URL change, no redeploy.
+## `dev-wake` starts Neptune, waits for it, and restores the services. Run `dev-wake`
+## before any deploy-dev (CloudFormation cannot update a stopped Neptune cluster).
+## OpenSearch Serverless has no stop: deploy with SCL_AOSS_MIN_OCU=0 to let it scale
+## to zero when idle. Optional env vars: SCL_PREFIX (default: coa).
+dev-sleep:
+	./scripts/dev-power.sh sleep dev
+
+dev-wake:
+	./scripts/dev-power.sh wake dev
+
+dev-status:
+	./scripts/dev-power.sh status dev
 
 ## Tear down all dev stacks in one command. Deletes AgentCore Runtimes,
 ## waits for their ENIs to detach (and stops if they do not),

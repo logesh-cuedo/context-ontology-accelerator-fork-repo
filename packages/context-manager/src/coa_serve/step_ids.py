@@ -26,6 +26,9 @@ class StepId(StrEnum):
     # Routing
     ROUTING_SELECT = "routing.select"
 
+    # Tier 2 — entity resolution (similarity search + LLM pick over companies/sectors)
+    T2_ENTITY_RESOLVE = "t2.entity.resolve"
+
     # Tier 2 — NL-to-SQL
     T2_SQL_GENERATE = "t2.sql.generate"
     T2_SQL_AUTHORIZE = "t2.sql.authorize"
@@ -65,6 +68,7 @@ TOOL_FOR_STEP: dict[str, str] = {
     StepId.T1_FIREWALL: "sql-firewall",
     StepId.T1_EXECUTE: "sql-engine",
     StepId.QUERY_EMBED: "bedrock",
+    StepId.T2_ENTITY_RESOLVE: "opensearch",
     StepId.T2_SQL_GENERATE: "bedrock",
     StepId.T2_SQL_AUTHORIZE: "cedar",
     StepId.T2_SQL_FIREWALL: "sql-firewall",

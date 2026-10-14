@@ -335,6 +335,9 @@ class NLtoSQLStrategy:
                 logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
 
         evidence = options.get("evidence", "")[:500]
+        # Set by the orchestrator's entity-resolution step when the question's
+        # companies/sectors were resolved against the sectors table.
+        entities = options.get("resolvedEntities", "")
         # Request-scoped: the tool caches this namespace's FK edges and named graphs
         # for the life of the object, and that cache must not outlive a request (a
         # namespace can be re-ingested between two of them). No catalog is passed —
@@ -360,6 +363,7 @@ class NLtoSQLStrategy:
             # unpinned, so pre-retrieval we forward best-effort). Empty on every
             # non-declining path, keeping the prompt byte-identical to the baseline.
             governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
+            entities=entities,
         )
 
         t_ms = int((time.perf_counter() - t_start) * 1000)
@@ -611,6 +615,7 @@ class NLtoSQLStrategy:
                     # authored against a different source is dropped rather than
                     # fed into the correction, which would otherwise burn the shot.
                     governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
+                    entities=entities,
                 )
                 correct_ms = int((time.perf_counter() - correct_start) * 1000)
                 if not sql:

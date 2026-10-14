@@ -701,6 +701,17 @@ def ontology_vector_index_name(prefix: str, namespace_id: str, default_namespace
     return f"{prefix}-{namespace_id}"
 
 
+def entity_vector_index_name(prefix: str, namespace_id: str) -> str:
+    """Return the OpenSearch index name for a namespace's company/sector entities.
+
+    Pattern: ``{prefix}-entities-{namespace_id}``. Written by
+    ``packages/context-manager/scripts/index_entities.py`` from the namespace's
+    sectors table and searched by serve's Tier-2 entity resolver. Dropped with the
+    namespace (control-plane ``namespace/cleanup.py``).
+    """
+    return f"{prefix}-entities-{namespace_id}"
+
+
 # ---------------------------------------------------------------------------
 # Namespace constants — keep in sync with models/src/main/smithy/namespace.smithy
 # ---------------------------------------------------------------------------

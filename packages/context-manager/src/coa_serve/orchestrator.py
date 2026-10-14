@@ -26,10 +26,11 @@ if TYPE_CHECKING:
     from .tier2.skip import Tier2SkipEvaluator
     from .tier3.agentic.retriever import AgenticRetriever
 from .model_validation import validate_model_id as _validate_model_id
-from .models import InvokeRequest, InvokeResponse
+from .models import ConfidenceScore, InvokeRequest, InvokeResponse, QueryResult
 from .response_assembler import ResponseAssembler
 from .step_ids import StepId
 from .tier1.metric_resolver import DeclinedMetricContext, MetricMatch, MetricResolver
+from .tier2.entity_resolution import EntityResolution, EntityResolver, resume_clarification
 from .tier2.skip import Tier2SkipDecision
 from .tier2.sql_firewall import FirewallResult, SQLFirewall
 from .tier2.strategy import (
@@ -122,6 +123,7 @@ class Orchestrator:
         agentic_retriever: AgenticRetriever | None = None,
         tier3_deep_reasoning_default: bool = False,
         tier1_metric_timeout_s: int = 35,
+        entity_resolver: EntityResolver | None = None,
     ):
         """Wire the per-tier resolvers and optional gating/skip helpers.
 
@@ -147,6 +149,9 @@ class Orchestrator:
                 default for Tier 3 (set when
                 config.tier3_strategy=="deep-reasoning").
             tier1_metric_timeout_s: Configured Tier-1 statement timeout (1..300).
+            entity_resolver: Optional Tier-2 entity resolver (similarity search over
+                the namespace's company/sector index + LLM pick). When None the step
+                is absent and Tier 2 runs exactly as before.
         """
         self._metric_resolver = metric_resolver
         self._knowledge_retriever = knowledge_retriever
@@ -185,6 +190,9 @@ class Orchestrator:
         if not 1 <= tier1_metric_timeout_s <= 300:
             raise ValueError("tier1_metric_timeout_s must be in the range 1..300")
         self._tier1_metric_timeout_s = tier1_metric_timeout_s
+        # Optional Tier-2 entity resolution. Fail-open: a namespace without an
+        # entity index resolves to "skipped" and Tier 2 is unchanged.
+        self._entity_resolver = entity_resolver
 
     async def resolve(
         self,
@@ -220,6 +228,16 @@ class Orchestrator:
         """
         if trace is None:
             trace = TraceCollector()
+        # The previous turn asked "which company did you mean?" — this message is
+        # the answer. Re-run the ORIGINAL question with the answer attached, and
+        # record that merged question as this turn's query so session history
+        # (and a further clarification) keeps the original intact.
+        if self._entity_resolver is not None:
+            resumed = resume_clarification(request.query, conversation_history)
+            if resumed:
+                logger.info("entity_clarification_resumed", namespace=request.namespace)
+                request.query = resumed
+
         query = request.query
         namespace = request.namespace
         profile = request.profile
@@ -313,11 +331,19 @@ class Orchestrator:
         if await self._should_run_tier2(
             strategy, gating, tier_override, options, query, namespace, query_embedding, trace
         ):
+            # Which company / sector is the question about? Found → handed to SQL
+            # generation; not found / ambiguous → ask the user before querying.
+            entities = await self._resolve_entities(query, namespace, query_embedding, trace, model_id_override)
+            if entities.needs_clarification:
+                return self._clarification_response(entities, trace, namespace, profile, model_id_override)
+            tier2_options = options
+            if entities.prompt_block():
+                tier2_options = {**options, "resolvedEntities": entities.prompt_block()}
             strategy_result, tier2_sparql = await self._run_tier2(
                 query,
                 namespace,
                 profile,
-                options,
+                tier2_options,
                 trace,
                 embedding=query_embedding,
                 strategy_selection=strategy,
@@ -650,6 +676,54 @@ class Orchestrator:
             return None
 
         return DEFAULT_STRATEGY
+
+    async def _resolve_entities(
+        self,
+        query: str,
+        namespace: str,
+        embedding: list[float] | None,
+        trace: TraceCollector,
+        model_id: str | None,
+    ) -> EntityResolution:
+        """Run the entity resolver (if wired) and record a trace step. Never raises."""
+        if self._entity_resolver is None:
+            return EntityResolution(status="skipped", reason="entity resolver not configured")
+        start = time.perf_counter()
+        resolution = await self._entity_resolver.resolve(query, namespace, embedding=embedding, model_id=model_id)
+        trace.record(
+            StepId.T2_ENTITY_RESOLVE,
+            "skipped" if resolution.status == "skipped" else "success",
+            int((time.perf_counter() - start) * 1000),
+            detail={
+                "status": resolution.status,
+                "companies": [c.name for c in resolution.companies],
+                "sectors": [s.name for s in resolution.sectors],
+                **({"reason": resolution.reason} if resolution.reason else {}),
+            },
+            tool_used="opensearch",
+        )
+        return resolution
+
+    def _clarification_response(
+        self,
+        resolution: EntityResolution,
+        trace: TraceCollector,
+        namespace: str,
+        profile: dict,
+        model_id: str | None,
+    ) -> InvokeResponse:
+        """Answer with the clarification question instead of running a query."""
+        metadata = self._assembler._base_metadata(namespace, display_principal(profile), model_id=model_id)
+        metadata["clarification"] = {"kind": "entity", "status": resolution.status}
+        return InvokeResponse(
+            result=QueryResult(
+                tier=2,
+                confidence=ConfidenceScore(score=0.0, rationale="Entity not resolved — asking the user"),
+                synthesized_answer=resolution.clarification,
+                trace=trace.steps,
+                metadata=metadata,
+            )
+        )
 
     async def _run_tier2(
         self,

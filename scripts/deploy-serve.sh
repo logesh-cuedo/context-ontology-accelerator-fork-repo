@@ -89,6 +89,10 @@ echo "--- Deploying CDK stack ---"
 
 CONTEXT="--context env=${ENV} --context context_manager_image_uri=${IMAGE_FULL}"
 [ -n "${SCL_PREFIX:-}" ] && CONTEXT="${CONTEXT} --context resource_prefix=${SCL_PREFIX}"
+# Mirrors deploy.sh: without this the namespace stack this one depends on
+# re-synthesizes DomainLoginRole against the default arn:aws:iam::<acct>:role/Admin
+# principal, which IAM rejects outside Amazon-internal accounts.
+[ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="${CONTEXT} --context smus_admin_principal_arns=${SCL_SMUS_ADMIN_ARNS}"
 
 APPROVAL="--require-approval=never"
 if [ "${ENV}" = "prod" ] || [ "${ENV}" = "production" ]; then

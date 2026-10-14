@@ -372,3 +372,45 @@ class TestDeleteSourcesStepDropsGraphragIndexes:
         assert order == ["delete_source", "drop_indexes"], "indexes must drop AFTER sources"
         assert result["sourcesDeleted"] == 1
         assert result["graphragIndexesDeleted"] == ["chunk_x"]
+
+
+@pytest.mark.unit
+class TestDeleteEntityIndex:
+    """The Tier-2 entity index ({collection}-entities-{ns}) goes with its namespace."""
+
+    def test_deletes_the_namespace_entity_index(self, monkeypatch):
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        monkeypatch.setenv("OSS_COLLECTION_NAME", "coa-dev-vector-store")
+        mock_client = MagicMock()
+        mock_client.delete_index.return_value = True
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        assert cleanup.delete_entity_index("ns-1") is True
+        mock_client.delete_index.assert_called_once_with("coa-dev-vector-store-entities-ns-1")
+
+    @pytest.mark.parametrize("missing", ["OSS_ENDPOINT", "OSS_COLLECTION_NAME"])
+    def test_noop_when_unconfigured(self, monkeypatch, missing):
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        monkeypatch.setenv("OSS_COLLECTION_NAME", "coa-dev-vector-store")
+        monkeypatch.delenv(missing)
+        called = MagicMock()
+        monkeypatch.setattr(cleanup, "AossVectorClient", called)
+
+        assert cleanup.delete_entity_index("ns-1") is False
+        called.assert_not_called()
+
+    def test_failure_propagates(self, monkeypatch):
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        monkeypatch.setenv("OSS_COLLECTION_NAME", "coa-dev-vector-store")
+        mock_client = MagicMock()
+        mock_client.delete_index.side_effect = RuntimeError("AOSS throttled")
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        with pytest.raises(RuntimeError, match="AOSS throttled"):
+            cleanup.delete_entity_index("ns-1")
