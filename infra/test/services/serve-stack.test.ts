@@ -797,6 +797,61 @@ describe("ServeStack - Tier-1 metric timeout", () => {
   });
 });
 
+describe("ServeStack - entity index on ontology publish", () => {
+  let template: Template;
+  beforeAll(() => {
+    template = createStack();
+  });
+
+  it("deploys the entity-index Lambda with a 15-minute budget", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "handler.handler",
+      Timeout: 900,
+      Environment: {
+        Variables: Match.objectLike({ ENTITY_TABLE_NAME: "sectors" }),
+      },
+    });
+  });
+
+  it("invokes it on ontology.published", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({ "detail-type": ["ontology.published"] }),
+      Targets: Match.arrayWith([
+        Match.objectLike({
+          Arn: {
+            "Fn::GetAtt": [Match.stringLikeRegexp("EntityIndexFn"), "Arn"],
+          },
+        }),
+      ]),
+    });
+  });
+
+  it("scopes its AOSS write access to the entity indexes", () => {
+    const policies = template.findResources(
+      "AWS::OpenSearchServerless::AccessPolicy",
+    );
+    const writer = Object.values(policies).find((p) =>
+      JSON.stringify(p).includes("entity-index-lambda"),
+    );
+    expect(writer).toBeDefined();
+    const body = JSON.stringify(writer);
+    expect(body).toContain("-entities-*");
+    expect(body).toContain("aoss:WriteDocument");
+  });
+
+  it("honours the entity_table_name CDK context override", () => {
+    createStack({ entity_table_name: "companies" }).hasResourceProperties(
+      "AWS::Lambda::Function",
+      {
+        Handler: "handler.handler",
+        Environment: {
+          Variables: Match.objectLike({ ENTITY_TABLE_NAME: "companies" }),
+        },
+      },
+    );
+  });
+});
+
 describe("ServeStack - credential-secret namespace binding", () => {
   // JDBC credential secrets are granted to the serve runtime per secret, by a
   // resource policy whose StringLike condition matches the namespace as a whole
@@ -883,7 +938,6 @@ describe("ServeStack - GRAPH_URI_TEMPLATE reader/writer alignment", () => {
   });
 });
 
-
 describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
   const envOf = (template: Template): Record<string, unknown> => {
     const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
@@ -900,9 +954,9 @@ describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
     // The load-bearing case: a numeric 0 in cdk.json context is falsy in JS, so a
     // truthiness check would drop it. serve-stack uses `!== undefined`, so it must
     // survive as "0" and be clamped downstream rather than silently ignored.
-    expect(envOf(createStack({ serve_vkg_translation_timeout_s: 0 }))).toMatchObject(
-      { SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" },
-    );
+    expect(
+      envOf(createStack({ serve_vkg_translation_timeout_s: 0 })),
+    ).toMatchObject({ SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" });
   });
 
   it("passes a set value through verbatim", () => {

@@ -13,21 +13,20 @@ import { describe, it, expect } from "vitest";
 import { buildOptions } from "./use-playground-chat-sse";
 
 describe("buildOptions", () => {
-  it("omits options entirely when nothing is set", () => {
-    // Spreading `{}` adds no key, so the request is byte-identical to one built
-    // before this field existed.
-    expect(buildOptions()).toEqual({});
+  it("always opts in to debug info so the Playground can show the SQL", () => {
+    // Serve omits queryUsed / sparqlGenerated unless includeDebugInfo is true.
+    expect(buildOptions()).toEqual({ options: { includeDebugInfo: true } });
   });
 
   it("sends mode alone, as it did before strategy existed", () => {
     expect(buildOptions("deep-reasoning")).toEqual({
-      options: { mode: "deep-reasoning" },
+      options: { mode: "deep-reasoning", includeDebugInfo: true },
     });
   });
 
   it("sends strategy alone", () => {
     expect(buildOptions(undefined, "ontop")).toEqual({
-      options: { strategy: "ontop" },
+      options: { strategy: "ontop", includeDebugInfo: true },
     });
   });
 
@@ -35,13 +34,19 @@ describe("buildOptions", () => {
     // The reason this is a helper rather than two conditional spreads: two
     // spreads of `options` would leave only the second.
     expect(buildOptions("standard", "ontop_first")).toEqual({
-      options: { mode: "standard", strategy: "ontop_first" },
+      options: {
+        mode: "standard",
+        strategy: "ontop_first",
+        includeDebugInfo: true,
+      },
     });
   });
 
   it("treats an empty string as unset rather than sending it", () => {
     // Guards the falsy-check: `""` must not reach the API as a pin, which serve
     // would fail to match and silently resolve to its default.
-    expect(buildOptions("" as never, "" as never)).toEqual({});
+    expect(buildOptions("" as never, "" as never)).toEqual({
+      options: { includeDebugInfo: true },
+    });
   });
 });

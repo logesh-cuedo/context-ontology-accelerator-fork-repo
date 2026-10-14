@@ -28,6 +28,39 @@ describe("formatStepDetail", () => {
     });
   });
 
+  describe("t2.entity.resolve formatter", () => {
+    it("lists resolved companies and sectors", () => {
+      expect(
+        formatStepDetail("t2.entity.resolve", {
+          status: "found",
+          companies: ["Bajaj Auto Ltd."],
+          sectors: ["Automobiles"],
+        }),
+      ).toBe("Resolved companies: Bajaj Auto Ltd.; sectors: Automobiles.");
+    });
+
+    it("says why the step was skipped", () => {
+      expect(
+        formatStepDetail("t2.entity.resolve", {
+          status: "skipped",
+          companies: [],
+          sectors: [],
+          reason: "entity index empty",
+        }),
+      ).toBe("Skipped (entity index empty).");
+    });
+
+    it("phrases a question with no entity", () => {
+      expect(
+        formatStepDetail("t2.entity.resolve", {
+          status: "no_entity",
+          companies: [],
+          sectors: [],
+        }),
+      ).toBe("No company or sector named in the question.");
+    });
+  });
+
   describe("t1.metric_match formatter", () => {
     it("formats success with metricName, matchSource, confidence", () => {
       const result = formatStepDetail("t1.metric_match", {

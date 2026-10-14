@@ -186,6 +186,35 @@ const stepFormatters: Record<string, Formatter> = {
       : "Translated SPARQL to SQL.";
   },
 
+  "t2.entity.resolve": (d) => {
+    // Which companies / sectors the question was pinned to before SQL
+    // generation. "skipped" is fail-open: Tier 2 ran unchanged.
+    const companies = summarizeList(d.companies);
+    const sectors = summarizeList(d.sectors);
+    switch (d.status) {
+      case "found": {
+        const parts: string[] = [];
+        if (companies) parts.push(`companies: ${companies}`);
+        if (sectors) parts.push(`sectors: ${sectors}`);
+        return parts.length > 0
+          ? `Resolved ${parts.join("; ")}.`
+          : "Entities resolved.";
+      }
+      case "no_entity":
+        return "No company or sector named in the question.";
+      case "ambiguous":
+        return companies
+          ? `Several matches (${companies}); asked which one.`
+          : "Several matches; asked which one.";
+      case "not_found":
+        return "No matching company found; asked to clarify.";
+      case "skipped":
+        return d.reason ? `Skipped (${String(d.reason)}).` : "Skipped.";
+      default:
+        return "";
+    }
+  },
+
   "t2.sql.generate": (d) => {
     // Error path: the NL→SQL strategy couldn't produce SQL (e.g. its schema
     // retrieval was unavailable). This is a non-fatal fallthrough — the VKG
@@ -309,6 +338,7 @@ const STEP_FALLBACKS: Record<string, string> = {
   "t2.vkg.failed": "VKG strategy abandoned.",
   "t2.strategy_selected": "Strategy selected.",
   "routing.select": "Intent routed.",
+  "t2.entity.resolve": "Entities resolved.",
 };
 
 /**

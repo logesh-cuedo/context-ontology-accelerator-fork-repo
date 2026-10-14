@@ -25,11 +25,15 @@ import { useSessions } from "./use-sessions";
 import { useTokenBuffer } from "./use-token-buffer";
 
 /**
- * Build the request's `options` object, omitting it entirely when nothing is set.
+ * Build the request's `options` object.
  *
  * One helper rather than two conditional spreads, because
  * `...(mode && { options: { mode } })` followed by the same for `strategy` would
  * have the second overwrite the first — both assign the whole `options` key.
+ *
+ * `includeDebugInfo` is always sent: serve withholds the generated SQL
+ * (`queryUsed`) and SPARQL (`sparqlGenerated`) unless the caller opts in, and
+ * the Playground's "Compiled artifacts" section renders exactly those fields.
  *
  * Exported for test: the Playground page test mocks this whole hook, so there is
  * no other coverage of the request shape.
@@ -37,12 +41,20 @@ import { useTokenBuffer } from "./use-token-buffer";
 export function buildOptions(
   mode?: ExecutionMode,
   strategy?: QueryStrategy,
-): { options?: { mode?: ExecutionMode; strategy?: QueryStrategy } } {
-  const options = {
-    ...(mode && { mode }),
-    ...(strategy && { strategy }),
+): {
+  options: {
+    mode?: ExecutionMode;
+    strategy?: QueryStrategy;
+    includeDebugInfo: true;
   };
-  return Object.keys(options).length > 0 ? { options } : {};
+} {
+  return {
+    options: {
+      ...(mode && { mode }),
+      ...(strategy && { strategy }),
+      includeDebugInfo: true,
+    },
+  };
 }
 
 export interface UsePlaygroundChatSSEOptions {

@@ -347,6 +347,13 @@ const SECTION_ORDER = ["t1", "t2", "t3", "other"];
 const SETUP_STEP_IDS = new Set(["query.embed", "routing.select"]);
 
 /**
+ * Tier-2 steps that run before either strategy. When the t2 section is split
+ * into NL→SQL / VKG subgroups they belong to neither, so they are kept in the
+ * section's lead-in — otherwise the split view would drop them.
+ */
+const TIER2_LEAD_IN_STEP_IDS = new Set(["t2.entity.resolve"]);
+
+/**
  * Classify a step ID into a tier-section key. Setup steps are routed to the
  * first retrieval tier that ran (Tier 2, else Tier 3) so they appear as a
  * lead-in rather than a free-floating section.
@@ -426,7 +433,9 @@ function buildTierSections(trace: TraceStep[]): TierSection[] {
   return SECTION_ORDER.filter((key) => stepsByKey.has(key)).map((key) => {
     if (key === "t2" && splitTier2) {
       const leadIn = trace.filter(
-        (s) => !s.parallelGroup && SETUP_STEP_IDS.has(s.step),
+        (s) =>
+          !s.parallelGroup &&
+          (SETUP_STEP_IDS.has(s.step) || TIER2_LEAD_IN_STEP_IDS.has(s.step)),
       );
       const sqlSteps = trace.filter(
         (s) => !s.parallelGroup && s.step.startsWith("t2.sql."),

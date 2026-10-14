@@ -409,7 +409,8 @@ async def _ensure_initialized():
             )
 
         # Tier-2 entity resolution: similarity search over the namespace's
-        # company/sector index (built by scripts/index_entities.py) + an LLM pick.
+        # company/sector index (rebuilt on ontology publish by the entity-index
+        # Lambda, or by hand with scripts/index_entities.py) + an LLM pick.
         # A namespace with no index resolves to "skipped" — no behavior change.
         # SERVE_ENTITY_RESOLUTION=off removes the step (and its LLM call) entirely.
         entity_resolver = (

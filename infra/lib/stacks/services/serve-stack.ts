@@ -5,6 +5,8 @@ import * as cdk from "aws-cdk-lib";
 import * as bedrockagentcore from "aws-cdk-lib/aws-bedrockagentcore";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
@@ -20,6 +22,7 @@ import { bundlePython } from "../../utils/python-bundling";
 import { fromRoot, Paths } from "../../paths";
 import { DynamoDBTable, SCLStack, SclMonitoring } from "../../constructs";
 import {
+  BRAND,
   CONNECTOR_SPILL_KEY_GLOB,
   CONNECTOR_SPILL_KMS_TAG_KEY,
   CONNECTOR_SPILL_KMS_TAG_VALUE,
@@ -384,6 +387,197 @@ export class ServeStack extends SCLStack {
       alarmAction: props.alarmAction,
     });
     monitoring.monitorLambda(aossProxyFn);
+
+    // ── Entity-index Lambda ───────────────────────────────────────────
+    // Rebuilds a namespace's company/sector index ({collection}-entities-{ns})
+    // on every ontology publish, from the namespace's `sectors` Glue table, so
+    // Tier-2 entity resolution works without a manual
+    // scripts/index_entities.py run. Fail-open: a namespace without that table
+    // is skipped and serve's entity step resolves to "skipped".
+    //
+    // Reads the table through Athena with its own role: works where the table
+    // is IAM-governed (IAM_ALLOWED_PRINCIPALS) or this role holds a Lake
+    // Formation SELECT grant. It is deliberately NOT given the LF self-grant
+    // path the discovery connector has (lf_grant.attempt_self_grant) — that is
+    // the platform's privilege-escalation primitive.
+    const entityIndexCode = bundlePython({
+      srcDirs: [
+        fromRoot("packages/context-manager/lambda/entity-index"),
+        fromRoot("libs/common/src"),
+      ],
+      pipDeps: [
+        "opensearch-py",
+        "requests-aws4auth",
+        "cedarpy",
+        "cryptography",
+        "pydantic-settings",
+        "PyJWT",
+        "requests",
+        "structlog",
+      ],
+      architecture: "arm64",
+    });
+
+    const entityIndexFn = new lambda.Function(this, "EntityIndexFn", {
+      functionName: this.prefixed("entity-index"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: "handler.handler",
+      code: entityIndexCode,
+      // ~8k companies embed in a few minutes from inside the region; the
+      // ceiling leaves headroom for larger sectors tables.
+      timeout: cdk.Duration.minutes(15),
+      memorySize: 1024,
+      environment: {
+        OSS_ENDPOINT: opensearchEndpoint,
+        OSS_COLLECTION_NAME: opensearchCollectionName,
+        DATA_SOURCES_TABLE: dataSourcesTableName,
+        NAMESPACES_TABLE: namespacesTableName,
+        ATHENA_WORKGROUP_PREFIX: this.prefixed(""),
+        SSM_PREFIX: ssmPrefix,
+        ENTITY_TABLE_NAME:
+          (this.node.tryGetContext("entity_table_name") as string) ?? "sectors",
+      },
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSecurityGroup],
+    });
+
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
+        resources: [dataSourcesTableArn, namespacesTableArn],
+      }),
+    );
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/config`,
+        ],
+      }),
+    );
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock:InvokeModel"],
+        resources: [
+          `arn:aws:bedrock:*:${account}:inference-profile/*`,
+          `arn:aws:bedrock:*::foundation-model/*`,
+        ],
+      }),
+    );
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:GetWorkGroup",
+        ],
+        resources: [
+          `arn:aws:athena:${region}:${account}:workgroup/${this.prefixed("")}*`,
+        ],
+      }),
+    );
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "glue:GetDatabase",
+          "glue:GetTable",
+          "glue:GetPartitions",
+          "glue:GetUnfilteredTableMetadata",
+          "glue:GetUnfilteredPartitionMetadata",
+        ],
+        resources: [
+          `arn:aws:glue:${region}:${account}:catalog`,
+          `arn:aws:glue:${region}:${account}:database/*`,
+          `arn:aws:glue:${region}:${account}:table/*/*`,
+        ],
+      }),
+    );
+    // lakeformation:GetDataAccess does not support resource-level restrictions.
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lakeformation:GetDataAccess"],
+        resources: ["*"],
+      }),
+    );
+    const entityIndexResultsBucket =
+      props.athenaResultsBucketName ?? this.prefixed("athena-results");
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+        ],
+        resources: [
+          `arn:aws:s3:::${entityIndexResultsBucket}`,
+          `arn:aws:s3:::${entityIndexResultsBucket}/*`,
+        ],
+      }),
+    );
+    entityIndexFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["aoss:APIAccessAll"],
+        resources: [opensearchCollectionArn],
+      }),
+    );
+    new opensearchserverless.CfnAccessPolicy(this, "OSSEntityIndexDataAccess", {
+      // Not "entity-index-writer": storage-stack owns that name for the
+      // opt-in human writers (aoss_writer_principal_arns).
+      name: this.prefixed("entity-index-lambda"),
+      type: "data",
+      description: "Entity-index Lambda: rebuild per-namespace entity indexes",
+      policy: JSON.stringify([
+        {
+          Rules: [
+            {
+              ResourceType: "index",
+              Resource: [
+                `index/${opensearchCollectionName}/${opensearchCollectionName}-entities-*`,
+              ],
+              Permission: [
+                "aoss:CreateIndex",
+                "aoss:DeleteIndex",
+                "aoss:UpdateIndex",
+                "aoss:DescribeIndex",
+                "aoss:ReadDocument",
+                "aoss:WriteDocument",
+              ],
+            },
+          ],
+          Principal: [entityIndexFn.role!.roleArn],
+        },
+      ]),
+    });
+    monitoring.monitorLambda(entityIndexFn);
+
+    // Same event (and the same source pair) as VKG's OntologyPublishedRule —
+    // see vkg-stack.ts for why the legacy static source is matched too.
+    const { eventSourcePrefix } = resolveContext(this.node);
+    const legacyOntologySource = `${BRAND}.ontology`;
+    const scopedOntologySource = `${eventSourcePrefix}.ontology`;
+    new events.Rule(this, "EntityIndexOnPublishRule", {
+      ruleName: this.prefixed("entity-index-on-publish"),
+      eventPattern: {
+        source:
+          scopedOntologySource === legacyOntologySource
+            ? [scopedOntologySource]
+            : [scopedOntologySource, legacyOntologySource],
+        detailType: ["ontology.published"],
+      },
+      targets: [
+        new targets.LambdaFunction(entityIndexFn, {
+          maxEventAge: cdk.Duration.hours(1),
+          // A rebuild drops and recreates the index, so a retry is safe.
+          retryAttempts: 1,
+        }),
+      ],
+    });
 
     // ── AgentCore Runtime (L2 alpha construct) ──────────────────────────
 

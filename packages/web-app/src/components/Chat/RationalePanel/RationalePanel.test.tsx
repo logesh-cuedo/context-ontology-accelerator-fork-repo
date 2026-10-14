@@ -249,6 +249,46 @@ describe("RationalePanel", () => {
       ).toBeInTheDocument();
     });
 
+    it("keeps the entity-resolution step when both strategies ran", () => {
+      // The split NL→SQL / VKG view only lists t2.sql.* and t2.vkg.* steps, so
+      // the pre-strategy entity step must be carried in the section lead-in.
+      const entityMessage: ChatMessage = {
+        id: "msg-entity",
+        role: "assistant",
+        content: "answer",
+        timestamp: new Date("2026-01-01T12:00:00Z"),
+        response: {
+          requestId: "req-entity",
+          result: {
+            tier: 2,
+            confidence: { score: 0.9, rationale: "" },
+            trace: [
+              { step: "query.embed", status: "success", durationMs: 100 },
+              {
+                step: "t2.entity.resolve",
+                status: "success",
+                durationMs: 900,
+                detail: {
+                  status: "found",
+                  companies: ["Tata Consultancy Services Ltd."],
+                  sectors: [],
+                },
+              },
+              { step: "t2.sql.generate", status: "success", durationMs: 1500 },
+              { step: "t2.sql.execute", status: "error", durationMs: 600 },
+              { step: "t2.vkg.context", status: "success", durationMs: 600 },
+            ],
+            partial: false,
+          },
+        },
+      };
+      renderPanel({ message: entityMessage });
+      expect(screen.getByText("Resolve entities")).toBeInTheDocument();
+      expect(
+        screen.getByText(/Resolved companies: Tata Consultancy Services Ltd\./),
+      ).toBeInTheDocument();
+    });
+
     it("renders compile step via the full normalize pipeline (both strategies ran)", () => {
       // Mirrors the live wire payload: NL→SQL fully executed (0 rows) AND VKG
       // ran with a translate failure + retry. Goes through normalizeResponse,
