@@ -881,7 +881,11 @@ export class NamespaceStack extends SCLStack {
     // does NOT modify the target role's trust policy.  We need both sides:
     //  1. Identity policy on DeletePlatformFn (already in namespace-deletion-pipeline.ts)
     //  2. Trust policy on namespaceApiFn's role (added here)
-    (namespaceApiFn.role! as iam.Role).assumeRolePolicy!.addStatements(
+    // `?.`, not `!`: in a private-VPC deployment this role is IMPORTED, and an
+    // imported role exposes no `assumeRolePolicy` at all. The operator owns the
+    // trust policy there and attaches this statement when creating the role —
+    // see pvt_vpc/DEPLOYMENT-NOTES.md. With `!` the synth crashed outright.
+    (namespaceApiFn.role as iam.Role).assumeRolePolicy?.addStatements(
       new iam.PolicyStatement({
         actions: ["sts:AssumeRole"],
         principals: [
