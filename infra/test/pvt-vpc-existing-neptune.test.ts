@@ -61,6 +61,8 @@ function writeConfig(neptune?: Record<string, string>): string {
         aossVpce: "sg-04",
         connector: "sg-05",
         discoveryOcsp: "sg-06",
+        agentCore: "sg-07",
+        mcp: "sg-08",
       },
       vpcEndpoints: { aossData: "vpce-0aoss" },
       ...(neptune ? { existing: { neptune } } : {}),

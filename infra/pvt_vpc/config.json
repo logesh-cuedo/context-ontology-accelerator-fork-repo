@@ -22,7 +22,9 @@
     "neptune": "",
     "aossVpce": "",
     "connector": "",
-    "discoveryOcsp": ""
+    "discoveryOcsp": "",
+    "agentCore": "",
+    "mcp": ""
   },
 
   "vpcEndpoints": {

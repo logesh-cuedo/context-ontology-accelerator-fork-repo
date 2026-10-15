@@ -39,6 +39,15 @@ export interface ServeStackProps extends cdk.StackProps {
   readonly aossSecurityGroup: ec2.ISecurityGroup;
   /** Neptune cluster security group — AgentCore SG needs ingress here (Gremlin/SPARQL). */
   readonly neptuneSecurityGroup: ec2.ISecurityGroup;
+  /**
+   * Pre-created security group for the Context Manager runtime, supplied only
+   * by a private-VPC deployment. When omitted this stack creates its own, as
+   * it always has. A locked-down account denies `ec2:CreateSecurityGroup`, so
+   * there the networking package makes it — together with every egress rule
+   * and the two ingress rules on the AOSS and Neptune groups — and the id
+   * arrives via `securityGroups.agentCore` in `pvt_vpc/config.json`.
+   */
+  readonly agentCoreSecurityGroup?: ec2.ISecurityGroup;
   /** Lambda security group (allowAllOutbound) for AOSS proxy. TODO(aoss-proxy): remove */
   readonly lambdaSecurityGroup: ec2.ISecurityGroup;
   /** Neptune cluster ARN — graph store for ontology traversal. */
@@ -189,48 +198,75 @@ export class ServeStack extends SCLStack {
 
     // ── Security Group ──────────────────────────────────────────────────
 
-    const agentCoreSg = new ec2.SecurityGroup(this, "AgentCoreSG", {
-      vpc: props.vpc,
-      description: "AgentCore Runtime - Context Manager",
-      allowAllOutbound: false,
-    });
+    // A private-VPC deployment supplies this group: that account denies
+    // `ec2:CreateSecurityGroup`, so the networking package created it and
+    // every rule below. `ownsAgentCoreSg` gates those rules, because CDK
+    // silently drops `addEgressRule` against an imported group and the two
+    // `CfnSecurityGroupIngress` resources would be refused outright.
+    const ownsAgentCoreSg = props.agentCoreSecurityGroup === undefined;
+    const agentCoreSg: ec2.ISecurityGroup =
+      props.agentCoreSecurityGroup ??
+      new ec2.SecurityGroup(this, "AgentCoreSG", {
+        vpc: props.vpc,
+        description: "AgentCore Runtime - Context Manager",
+        allowAllOutbound: false,
+      });
 
-    agentCoreSg.addEgressRule(
+    /**
+     * Add an egress rule, but only when this stack created the group.
+     *
+     * CDK drops `addEgressRule` against an imported (`mutable: false`) group
+     * without warning, so calling it there would read as configured egress
+     * that does not exist. A no-op makes that explicit, and the networking
+     * package carries the same rules — keep the two in step.
+     */
+    const addAgentCoreEgress = (
+      peer: ec2.IPeer,
+      port: ec2.Port,
+      description: string,
+    ): void => {
+      if (!ownsAgentCoreSg) {
+        return;
+      }
+      (agentCoreSg as ec2.SecurityGroup).addEgressRule(peer, port, description);
+    };
+
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(443),
       "HTTPS to VPC endpoints",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
       "HTTPS to external services via NAT",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(8182),
       "Neptune within VPC",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(8080),
       "VKG service within VPC",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(5432),
       "PostgreSQL to JDBC sources within VPC",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(3306),
       "MySQL to JDBC sources within VPC",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(1433),
       "MSSQL to JDBC sources within VPC",
     );
-    agentCoreSg.addEgressRule(
+    addAgentCoreEgress(
       ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
       ec2.Port.tcp(5439),
       "Redshift to JDBC sources within VPC",
@@ -258,7 +294,7 @@ export class ServeStack extends SCLStack {
     ];
     for (const cidr of remoteCidrs) {
       for (const port of jdbcDbPorts) {
-        agentCoreSg.addEgressRule(
+        addAgentCoreEgress(
           ec2.Peer.ipv4(cidr),
           ec2.Port.tcp(port),
           `JDBC port ${port} to peer network ${cidr}`,
@@ -267,28 +303,39 @@ export class ServeStack extends SCLStack {
     }
 
     // Allow AgentCore → AOSS VPC endpoint (L1 to avoid cross-stack cycle)
-    new ec2.CfnSecurityGroupIngress(this, "AossVpceIngress", {
-      groupId: props.aossSecurityGroup.securityGroupId,
-      ipProtocol: "tcp",
-      fromPort: 443,
-      toPort: 443,
-      sourceSecurityGroupId: agentCoreSg.securityGroupId,
-      description: "Allow HTTPS from AgentCore to AOSS VPC endpoint",
-    });
+    //
+    // Skipped in a private-VPC deployment: this is `ec2:CreateSecurityGroup`
+    // territory (an ingress rule is a security-group resource), which that
+    // account denies. The networking package carries the equivalent rule as
+    // `AgentCoreAossIngress`.
+    if (ownsAgentCoreSg) {
+      new ec2.CfnSecurityGroupIngress(this, "AossVpceIngress", {
+        groupId: props.aossSecurityGroup.securityGroupId,
+        ipProtocol: "tcp",
+        fromPort: 443,
+        toPort: 443,
+        sourceSecurityGroupId: agentCoreSg.securityGroupId,
+        description: "Allow HTTPS from AgentCore to AOSS VPC endpoint",
+      });
+    }
 
     // Allow AgentCore → Neptune (L1 to avoid cross-stack cycle). Without this,
     // agentCoreSg's egress rule on 8182 is necessary but not sufficient —
     // Neptune's own SG only allowed ingress from the ECS and Lambda SGs, so
     // every Gremlin/SPARQL call from the AgentCore runtime hung until
     // ConnectTimeout (~30s) and Tier-1/Tier-2 resolution never completed.
-    new ec2.CfnSecurityGroupIngress(this, "NeptuneIngress", {
-      groupId: props.neptuneSecurityGroup.securityGroupId,
-      ipProtocol: "tcp",
-      fromPort: 8182,
-      toPort: 8182,
-      sourceSecurityGroupId: agentCoreSg.securityGroupId,
-      description: "Allow Neptune Gremlin/SPARQL from AgentCore runtime",
-    });
+    // Skipped in a private-VPC deployment, same as AossVpceIngress above. The
+    // networking package carries it as `AgentCoreNeptuneIngress`.
+    if (ownsAgentCoreSg) {
+      new ec2.CfnSecurityGroupIngress(this, "NeptuneIngress", {
+        groupId: props.neptuneSecurityGroup.securityGroupId,
+        ipProtocol: "tcp",
+        fromPort: 8182,
+        toPort: 8182,
+        sourceSecurityGroupId: agentCoreSg.securityGroupId,
+        description: "Allow Neptune Gremlin/SPARQL from AgentCore runtime",
+      });
+    }
 
     // ── AOSS Search Proxy Lambda ──────────────────────────────────────
     // AgentCore containers cannot access AOSS data plane directly (service

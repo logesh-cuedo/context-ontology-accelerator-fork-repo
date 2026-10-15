@@ -80,6 +80,24 @@ export class NetworkStack extends SCLStack {
   /** Security group for Glue Connections to reach source databases. */
   public readonly connectorSecurityGroup: ec2.ISecurityGroup;
 
+  // The two AgentCore runtime groups are created in their own stacks in the
+  // standard flow, where each stack owns the group it attaches. A private-VPC
+  // deployment cannot create either, so they are imported HERE — alongside the
+  // other six — and passed down, which keeps every security group import in
+  // one place.
+
+  /**
+   * Security group for the Context Manager AgentCore runtime (serve stack).
+   * `undefined` in the standard flow, where ServeStack creates its own.
+   */
+  public readonly agentCoreSecurityGroup?: ec2.ISecurityGroup;
+
+  /**
+   * Security group for the MCP server AgentCore runtime (mcp stack).
+   * `undefined` in the standard flow, where McpStack creates its own.
+   */
+  public readonly mcpSecurityGroup?: ec2.ISecurityGroup;
+
   constructor(scope: Construct, id: string, props?: NetworkStackProps) {
     super(scope, id, props);
     this.addComponentTag("foundation");
@@ -275,6 +293,8 @@ export class NetworkStack extends SCLStack {
       this.aossSecurityGroup = imported.aoss;
       this.connectorSecurityGroup = imported.connector;
       this.discoveryOcspSecurityGroup = imported.discoveryOcsp;
+      this.agentCoreSecurityGroup = imported.agentCore;
+      this.mcpSecurityGroup = imported.mcp;
 
       // The AOSS DATA-PLANE endpoint id, which StorageStack names explicitly
       // in the OpenSearch Serverless network policy's `SourceVPCEs`.
@@ -570,6 +590,8 @@ export class NetworkStack extends SCLStack {
     aoss: ec2.ISecurityGroup;
     connector: ec2.ISecurityGroup;
     discoveryOcsp: ec2.ISecurityGroup;
+    agentCore: ec2.ISecurityGroup;
+    mcp: ec2.ISecurityGroup;
   } {
     const groups = config.securityGroups ?? {};
 
@@ -578,8 +600,8 @@ export class NetworkStack extends SCLStack {
         mutable: false,
       });
 
-    // validate() in pvt-vpc-config has already proven all six are present, so
-    // the non-null assertions here cannot fire at runtime.
+    // validate() in pvt-vpc-config has already proven all eight are present,
+    // so the non-null assertions here cannot fire at runtime.
     return {
       neptune: importGroup(groups.neptune!, "ImportedNeptuneSG"),
       ecs: importGroup(groups.ecs!, "ImportedEcsSG"),
@@ -590,6 +612,8 @@ export class NetworkStack extends SCLStack {
         groups.discoveryOcsp!,
         "ImportedDiscoveryOcspSG",
       ),
+      agentCore: importGroup(groups.agentCore!, "ImportedAgentCoreSG"),
+      mcp: importGroup(groups.mcp!, "ImportedMcpSG"),
     };
   }
 

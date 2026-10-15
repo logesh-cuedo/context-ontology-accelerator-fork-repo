@@ -56,6 +56,8 @@ function writeConfig(): string {
         aossVpce: "sg-04",
         connector: "sg-05",
         discoveryOcsp: "sg-06",
+        agentCore: "sg-07",
+        mcp: "sg-08",
       },
       vpcEndpoints: { aossData: AOSS_ENDPOINT },
     }),

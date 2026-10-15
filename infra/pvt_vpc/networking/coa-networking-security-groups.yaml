@@ -5,9 +5,9 @@
 # EVERY security group lives in this file. The endpoints template (2 of 2)
 # creates none at all -- it takes the group id below as a parameter.
 #
-#   17 resources:  7 security groups + 6 ingress + 4 egress
+#   21 resources:  9 security groups + 8 ingress + 4 egress
 #
-#   - 6 application groups, whose ids go into pvt_vpc/config.json
+#   - 8 application groups, whose ids go into pvt_vpc/config.json
 #   - 1 shared group for all 20 interface VPC endpoints
 #
 # APPLY THIS FIRST. The endpoints template needs
@@ -338,6 +338,111 @@ Resources:
         Description: Snowflake OCSP
 
   # ==========================================================================
+  # AgentCore runtime - Context Manager (serve stack)
+  #
+  # -> config.json  securityGroups.agentCore
+  #
+  # The runtime reaches AOSS and Neptune DIRECTLY, not through the ECS group,
+  # so the two ingress rules naming it as the source live here as well.
+  # ==========================================================================
+  AgentCoreSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: AgentCore Runtime - Context Manager
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-agent-core-sg'
+      # The standard flow also opens 443 to 0.0.0.0/0, for the AgentCore
+      # invocations API "via NAT". Omitted deliberately: this VPC has no NAT
+      # and no internet gateway, so that rule would allow traffic that cannot
+      # route anywhere. The AgentCore interface endpoint serves it instead.
+      # If AgentCore ever needs an address no endpoint covers, that is a NAT
+      # decision, not a rule to add here.
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref VpcCidr
+        Description: HTTPS to VPC endpoints
+      - IpProtocol: tcp
+        FromPort: 8182
+        ToPort: 8182
+        CidrIp: !Ref VpcCidr
+        Description: Neptune within VPC
+      - IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+        CidrIp: !Ref VpcCidr
+        Description: VKG service within VPC
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        CidrIp: !Ref VpcCidr
+        Description: PostgreSQL to JDBC sources within VPC
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        CidrIp: !Ref VpcCidr
+        Description: MySQL to JDBC sources within VPC
+      - IpProtocol: tcp
+        FromPort: 1433
+        ToPort: 1433
+        CidrIp: !Ref VpcCidr
+        Description: MSSQL to JDBC sources within VPC
+      - IpProtocol: tcp
+        FromPort: 5439
+        ToPort: 5439
+        CidrIp: !Ref VpcCidr
+        Description: Redshift to JDBC sources within VPC
+  # The standard flow creates these two from serve-stack.ts. A private-VPC
+  # deployment cannot, so they are here instead.
+  AgentCoreAossIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AossSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt AgentCoreSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      Description: Allow HTTPS from AgentCore to AOSS VPC endpoint
+  AgentCoreNeptuneIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt NeptuneSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt AgentCoreSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8182
+      ToPort: 8182
+      Description: Allow Neptune Gremlin/SPARQL from AgentCore runtime
+
+  # ==========================================================================
+  # AgentCore runtime - MCP server (mcp stack)
+  #
+  # -> config.json  securityGroups.mcp
+  #
+  # A thin protocol adapter: it forwards to the Context Manager and invokes
+  # backend Lambdas, so it needs HTTPS and nothing else. No ingress: AgentCore
+  # runtimes are invoked through the service API, not over the network.
+  # ==========================================================================
+  McpSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: AgentCore Runtime - MCP Server (thin proxy)
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-mcp-sg'
+      # Same omission as AgentCoreSecurityGroup above: the standard flow's
+      # second rule (443 to 0.0.0.0/0 via NAT) has nowhere to route here.
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref VpcCidr
+        Description: HTTPS to VPC endpoints (AgentCore)
+
+  # ==========================================================================
   # Interface VPC endpoints - one shared group for all 20
   #
   # Not an application group: the deployment never imports this one. Its id is
@@ -394,6 +499,12 @@ Outputs:
   DiscoveryOcspSecurityGroupId:
     Value: !GetAtt DiscoveryOcspSecurityGroup.GroupId
     Description: -> config.json  securityGroups.discoveryOcsp
+  AgentCoreSecurityGroupId:
+    Value: !GetAtt AgentCoreSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.agentCore
+  McpSecurityGroupId:
+    Value: !GetAtt McpSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.mcp
 
   InterfaceEndpointSecurityGroupId:
     Value: !GetAtt InterfaceEndpointSecurityGroup.GroupId

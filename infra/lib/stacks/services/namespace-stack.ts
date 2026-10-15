@@ -124,10 +124,17 @@ export class NamespaceStack extends SCLStack {
     // Custom scoped policy for SMUS domain execution role.
     // Grants only the minimum permissions required for SMUS IAM-based domain operations.
     // Replaces SageMakerStudioAdminIAMPermissiveExecutionPolicy which grants overly broad iam:* and s3:* wildcards.
-    const smusExecutionPolicy = new iam.ManagedPolicy(
-      this,
-      "SMUSExecutionPolicy",
-      {
+    //
+    // Carries an explicit name, so a private-VPC deployment imports it by that
+    // same name — the account denies `iam:CreatePolicy`. The statements below
+    // remain the source of truth for what the operator must put on it; the
+    // permission manifest records them.
+    const smusExecutionPolicy =
+      roles.importNamedManagedPolicy(
+        "smus-exec-policy",
+        "SMUSExecutionPolicy",
+      ) ??
+      new iam.ManagedPolicy(this, "SMUSExecutionPolicy", {
         managedPolicyName: this.prefixed("smus-exec-policy"),
         description: "Scoped permissions for SMUS domain execution role",
         statements: [
@@ -306,8 +313,7 @@ export class NamespaceStack extends SCLStack {
             ],
           }),
         ],
-      },
-    );
+      });
 
     // Already carried an explicit name, so private mode imports it by the
     // same name. Its trust policy and managed policy are pre-attached there.

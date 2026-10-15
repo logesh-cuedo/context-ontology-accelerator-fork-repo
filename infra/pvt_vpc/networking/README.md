@@ -2,14 +2,14 @@
 
 **For:** the AWS account owner / network team.
 
-**Two** CloudFormation templates that add the **22 VPC endpoints and 7 security
+**Two** CloudFormation templates that add the **22 VPC endpoints and 9 security
 groups** the Context Ontology Accelerator needs into a VPC you already have,
 split by resource type — one file of security groups, one of endpoints. The
 deployment imports these; it creates no networking itself.
 
 | Template | Creates | Apply |
 |---|---|---|
-| `coa-networking-security-groups.yaml` | **all** security groups — 6 application + 1 shared for the endpoints — and the 10 rules (17 resources) | **first** |
+| `coa-networking-security-groups.yaml` | **all** security groups — 8 application + 1 shared for the endpoints — and the 12 rules (21 resources) | **first** |
 | `coa-networking-vpc-endpoints.yaml` | 22 endpoints, no security groups (22 resources) | second |
 
 The split is by resource type: **every security group is in the first file, every
@@ -112,15 +112,15 @@ an oversight.
 
 ## What these templates create
 
-39 resources in total.
+43 resources in total.
 
-**`coa-networking-security-groups.yaml`** — 17:
+**`coa-networking-security-groups.yaml`** — 21:
 
 | Resource | Count |
 |---|---:|
-| Application security groups | 6 |
+| Application security groups | 8 |
 | Shared security group for all interface endpoints | 1 |
-| Security group rules (ingress + egress) | 10 |
+| Security group rules (ingress + egress) | 12 |
 
 **`coa-networking-vpc-endpoints.yaml`** — 22:
 
@@ -135,16 +135,22 @@ else. What restricts the service reached is the endpoint itself; the group only
 decides who may open the connection. To give one endpoint tighter rules, add a
 second group to template 1, output it, and pass it to that endpoint.
 
-The 6 application security groups are:
+The 8 application security groups are:
 
 | Name | Purpose |
 |---|---|
 | `…-lambda-sg` | Lambda functions |
 | `…-ecs-sg` | Fargate tasks (ontology engine, VKG) |
-| `…-neptune-sg` | Graph database — inbound 8182 from Lambda/ECS only, no outbound |
-| `…-aoss-vpce-sg` | OpenSearch endpoint — inbound 443 from Lambda/ECS only |
+| `…-neptune-sg` | Graph database — inbound 8182 from Lambda/ECS/AgentCore only, no outbound |
+| `…-aoss-vpce-sg` | OpenSearch endpoint — inbound 443 from Lambda/ECS/AgentCore only |
 | `…-connector-sg` | Database connectors (self-referencing, required by Glue/Athena) |
 | `…-discovery-ocsp-sg` | Outbound 80 for Snowflake certificate checks |
+| `…-agent-core-sg` | Context Manager AgentCore runtime — reaches AOSS and Neptune directly |
+| `…-mcp-sg` | MCP server AgentCore runtime — HTTPS only |
+
+The last two have no equivalent in the standard flow's networking: there each
+runtime's stack creates its own group. A locked-down account denies that, so
+they are created here and imported by id.
 
 ## Outbound database ports
 
@@ -168,6 +174,8 @@ From **`coa-networking-security-groups`**:
 | `AossSecurityGroupId` | `securityGroups.aossVpce` |
 | `ConnectorSecurityGroupId` | `securityGroups.connector` |
 | `DiscoveryOcspSecurityGroupId` | `securityGroups.discoveryOcsp` |
+| `AgentCoreSecurityGroupId` | `securityGroups.agentCore` |
+| `McpSecurityGroupId` | `securityGroups.mcp` |
 
 That stack has a **seventh** output, `InterfaceEndpointSecurityGroupId`, which
 does **not** go into the config — it is a parameter of the endpoints template.

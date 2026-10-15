@@ -90,8 +90,9 @@ export interface PvtVpcNetwork {
 }
 
 /**
- * The six named security groups from the networking package. Each is attached
- * to a different tier and carries different rules — see the deployment notes.
+ * The eight named security groups from the networking package. Each is
+ * attached to a different tier and carries different rules — see the
+ * deployment notes.
  */
 export interface PvtVpcSecurityGroups {
   readonly lambda?: string;
@@ -100,6 +101,16 @@ export interface PvtVpcSecurityGroups {
   readonly aossVpce?: string;
   readonly connector?: string;
   readonly discoveryOcsp?: string;
+  /**
+   * The Context Manager AgentCore runtime (serve stack). Separate from `ecs`
+   * because the runtime reaches AOSS and Neptune directly, so the networking
+   * package gives those two groups an ingress rule naming THIS group as the
+   * source — see `AgentCoreAossIngress`/`AgentCoreNeptuneIngress` in
+   * `pvt_vpc/networking/coa-networking-security-groups.yaml`.
+   */
+  readonly agentCore?: string;
+  /** The MCP server AgentCore runtime (mcp stack). HTTPS egress only. */
+  readonly mcp?: string;
 }
 
 /**
@@ -488,6 +499,8 @@ export function validate(config: PvtVpcConfigFile, vpcId?: string): string[] {
     "aossVpce",
     "connector",
     "discoveryOcsp",
+    "agentCore",
+    "mcp",
   ];
   for (const key of sgKeys) {
     require(config.securityGroups?.[key], `securityGroups.${key}`);

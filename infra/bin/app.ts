@@ -402,6 +402,9 @@ async function deploy(): Promise<void> {
     aossSecurityGroup: network.aossSecurityGroup,
     neptuneSecurityGroup: network.neptuneSecurityGroup,
     lambdaSecurityGroup: network.lambdaSecurityGroup,
+    // Set only in a private-VPC deployment; undefined there means "create it",
+    // which is what the standard flow has always done.
+    agentCoreSecurityGroup: network.agentCoreSecurityGroup,
     neptuneClusterArn: storage.neptuneClusterArn,
     neptuneEndpoint: storage.neptuneClusterEndpoint,
     ontologyBucketArn: storage.ontologyArtifactsBucket.bucketArn,
@@ -529,6 +532,8 @@ async function deploy(): Promise<void> {
     rolesTable: authnz.rolesTable,
     resourceRoleMappingsTable: authnz.resourceRoleMappingsTable,
     agentCoreAzNames,
+    // As with serve: undefined in the standard flow means "create it".
+    mcpSecurityGroup: network.mcpSecurityGroup,
   });
   mcp.addDependency(serve); // needs CM runtime-arn SSM param
   mcp.addDependency(metricService); // needs /metric/api-fn-arn SSM param (discovery tools)

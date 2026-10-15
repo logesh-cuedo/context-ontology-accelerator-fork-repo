@@ -287,6 +287,34 @@ export class PvtVpcRoles {
   }
 
   /**
+   * A customer-managed policy by name, for the same reason as
+   * {@link importNamed}: a locked-down account denies `iam:CreatePolicy`
+   * alongside `iam:CreateRole`.
+   *
+   * Returns `undefined` in standard mode, so the call site reads:
+   *
+   *     const policy = roles.importNamedManagedPolicy("smus-exec-policy", "P")
+   *       ?? new iam.ManagedPolicy(this, "P", { ... });
+   *
+   * @param unprefixedName the name as passed to `prefixed()`
+   * @param logicalId      the construct id the created policy would have used
+   */
+  importNamedManagedPolicy(
+    unprefixedName: string,
+    logicalId: string,
+  ): iam.IManagedPolicy | undefined {
+    if (!this.config.privateVpcMode) {
+      return undefined;
+    }
+    const name = prefixed(this.scope.node, unprefixedName);
+    return iam.ManagedPolicy.fromManagedPolicyArn(
+      this.scope,
+      logicalId,
+      `arn:aws:iam::${this.config.account}:policy/${name}`,
+    );
+  }
+
+  /**
    * The role for one construct.
    *
    * In standard mode this CREATES a named role; in private mode it IMPORTS

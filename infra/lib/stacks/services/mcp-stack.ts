@@ -26,6 +26,14 @@ export interface McpStackProps extends cdk.StackProps {
   readonly resourceRoleMappingsTable: dynamodb.ITable;
   /** AgentCore-supported AZ names for subnet filtering. */
   readonly agentCoreAzNames?: string[];
+  /**
+   * Pre-created security group for the runtime, supplied only by a
+   * private-VPC deployment. When omitted this stack creates its own, as it
+   * always has. A locked-down account denies `ec2:CreateSecurityGroup`, so
+   * there the networking package makes it and the id arrives via
+   * `securityGroups.mcp` in `pvt_vpc/config.json`.
+   */
+  readonly mcpSecurityGroup?: ec2.ISecurityGroup;
 }
 
 /**
@@ -99,24 +107,36 @@ export class McpStack extends SCLStack {
     );
 
     // ── Security Group (minimal: HTTPS only) ──────────────────────────
-    const mcpSg = new ec2.SecurityGroup(this, "McpSG", {
-      vpc: props.vpc,
-      description: "AgentCore Runtime - MCP Server (thin proxy)",
-      allowAllOutbound: false,
-    });
+    //
+    // A private-VPC deployment supplies the group: that account denies
+    // `ec2:CreateSecurityGroup`, so the networking package created it and both
+    // egress rules. `addEgressRule` on an imported group is silently dropped
+    // by CDK, which is why the rules below are inside the else branch rather
+    // than applied unconditionally.
+    let mcpSg: ec2.ISecurityGroup;
+    if (props.mcpSecurityGroup) {
+      mcpSg = props.mcpSecurityGroup;
+    } else {
+      const createdSg = new ec2.SecurityGroup(this, "McpSG", {
+        vpc: props.vpc,
+        description: "AgentCore Runtime - MCP Server (thin proxy)",
+        allowAllOutbound: false,
+      });
 
-    // HTTPS to VPC endpoints (AgentCore invocations)
-    mcpSg.addEgressRule(
-      ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
-      ec2.Port.tcp(443),
-      "HTTPS to VPC endpoints (AgentCore)",
-    );
-    // HTTPS to AgentCore public endpoint (invocations API via NAT)
-    mcpSg.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      "HTTPS to AgentCore invocations API",
-    );
+      // HTTPS to VPC endpoints (AgentCore invocations)
+      createdSg.addEgressRule(
+        ec2.Peer.ipv4(props.vpc.vpcCidrBlock),
+        ec2.Port.tcp(443),
+        "HTTPS to VPC endpoints (AgentCore)",
+      );
+      // HTTPS to AgentCore public endpoint (invocations API via NAT)
+      createdSg.addEgressRule(
+        ec2.Peer.anyIpv4(),
+        ec2.Port.tcp(443),
+        "HTTPS to AgentCore invocations API",
+      );
+      mcpSg = createdSg;
+    }
 
     // ── Container Image ───────────────────────────────────────────────
     const explicitImageUri = this.node.tryGetContext(
