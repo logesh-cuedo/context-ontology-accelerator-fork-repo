@@ -1,0 +1,184 @@
+{
+  "roleName": "coa-dev-db-enrichment-task-def-task-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "DbEnrichmentTaskDefTaskRole621D1D1E",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "ecs-tasks.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      },
+      {
+        "Action": "bedrock:InvokeModel",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:*:${AccountId}:inference-profile/*"
+        ]
+      },
+      {
+        "Action": "bedrock:ApplyGuardrail",
+        "Effect": "Allow",
+        "Resource": "arn:aws:bedrock:${Region}:${AccountId}:guardrail/*"
+      },
+      {
+        "Action": "ssm:GetParameter",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/coa/bedrock/retrieval-guardrail-id"
+      },
+      {
+        "Action": "cloudwatch:PutMetricData",
+        "Condition": {
+          "StringEquals": {
+            "cloudwatch:namespace": "COA/Guardrails"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "secretsmanager:GetSecretValue",
+        "Condition": {
+          "Null": {
+            "secretsmanager:ResourceTag/coa:namespace": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:${Region}:${AccountId}:secret:coa-dev-datasource-*",
+        "Sid": "ReadNamespaceBoundCredentialSecret"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "Null": {
+            "sts:ExternalId": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::*:role/coa-dev-datasource-access-*",
+        "Sid": "AssumeRoleCustomerProvided"
+      },
+      {
+        "Action": [
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetDatabase",
+          "glue:GetConnection",
+          "glue:GetCatalog",
+          "glue:GetCatalogs"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:glue:${Region}:${AccountId}:catalog",
+          "arn:aws:glue:${Region}:${AccountId}:catalog/*",
+          "arn:aws:glue:${Region}:${AccountId}:database/*",
+          "arn:aws:glue:${Region}:${AccountId}:table/*/*",
+          "arn:aws:glue:${Region}:${AccountId}:connection/*"
+        ],
+        "Sid": "EnrichmentGlueCatalogAccess"
+      }
+    ]
+  },
+  "statementCount": 14
+}

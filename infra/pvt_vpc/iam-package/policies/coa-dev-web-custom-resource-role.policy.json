@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "cognito-idp:UpdateUserPoolClient",
+      "Effect": "Allow",
+      "Resource": "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/${SsmParameterValuecoauserpoolidC96584B6F00A464EAD1953AFF4B05118Parameter}"
+    },
+    {
+      "Action": [
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:POST"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+    },
+    {
+      "Action": [
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:POST"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+    },
+    {
+      "Action": "apigateway:POST",
+      "Effect": "Allow",
+      "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+    }
+  ]
+}

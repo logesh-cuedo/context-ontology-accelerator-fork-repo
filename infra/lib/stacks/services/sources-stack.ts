@@ -37,6 +37,7 @@ import {
 } from "../../context";
 import { Paths, fromRoot } from "../../paths";
 import { PvtVpcRoles } from "../../pvt-vpc-roles";
+import { resolveStaging } from "../../pvt-vpc-config";
 import { bundlePython } from "../../utils/python-bundling";
 import { grantEventsDeliveryToLogGroup } from "../../utils/events-log-group-policy";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
@@ -3368,11 +3369,19 @@ export class SourcesStack extends SCLStack {
     // `sessionContext` — an IAM user, a root call — is NOT covered by the `!=` terms,
     // because a comparison against an absent field is false. Without it the filter
     // would exempt exactly the callers least likely to be legitimate.
+    // With `staging` configured the app uses CliCredentialsStackSynthesizer,
+    // which assumes no role: CloudFormation acts as whatever principal ran the
+    // deploy, so there is no cfn-exec-role to allowlist. Keeping the bootstrap
+    // name here would allowlist a role that does not exist — harmless for
+    // filtering, but it would read as an exemption that is actually absent, so
+    // the term is dropped and the real deployer is named via the context key.
     const cfnExecRoleName =
       (this.node.tryGetContext("cdk_cfn_exec_role_name") as
         | string
         | undefined) ??
-      `cdk-${cdk.DefaultStackSynthesizer.DEFAULT_QUALIFIER}-cfn-exec-role-${this.account}-${this.region}`;
+      (resolveStaging()
+        ? undefined
+        : `cdk-${cdk.DefaultStackSynthesizer.DEFAULT_QUALIFIER}-cfn-exec-role-${this.account}-${this.region}`);
     const issuerField =
       "$.detail.userIdentity.sessionContext.sessionIssuer.userName";
     const unexpectedWriteMetric = new logs.MetricFilter(
@@ -3384,9 +3393,20 @@ export class SourcesStack extends SCLStack {
         metricName: "UnexpectedConnectorParameterWrite",
         metricValue: "1",
         filterPattern: logs.FilterPattern.literal(
-          `{ (${issuerField} NOT EXISTS) ` +
-            `|| ((${issuerField} != "${sourcesApiRole.roleName}") ` +
-            `&& (${issuerField} != "${cfnExecRoleName}")) }`,
+          [
+            `{ (${issuerField} NOT EXISTS) || (`,
+            [
+              `(${issuerField} != "${sourcesApiRole.roleName}")`,
+              // Omitted when there is no cfn-exec-role to exempt, rather than
+              // emitting `!= "undefined"` — which would match every real
+              // principal and so silently exempt nobody while looking like a
+              // deliberate allowlist entry.
+              ...(cfnExecRoleName
+                ? [`(${issuerField} != "${cfnExecRoleName}")`]
+                : []),
+            ].join(" && "),
+            `) }`,
+          ].join(""),
         ),
       },
     ).metric({ statistic: "Sum", period: cdk.Duration.minutes(5) });

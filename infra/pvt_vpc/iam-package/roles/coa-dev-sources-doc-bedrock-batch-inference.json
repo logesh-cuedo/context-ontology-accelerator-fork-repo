@@ -1,0 +1,61 @@
+{
+  "roleName": "coa-dev-sources-doc-bedrock-batch-inference",
+  "stack": "coa-dev-sources",
+  "logicalId": "SourcesBatchInferenceRole2C37F300",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "${AccountId}"
+          },
+          "ArnLike": {
+            "aws:SourceArn": "arn:aws:bedrock:${Region}:${AccountId}:model-invocation-job/*"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "bedrock.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "s3:GetObject*",
+          "s3:GetBucket*",
+          "s3:List*",
+          "s3:DeleteObject*",
+          "s3:PutObject",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging",
+          "s3:Abort*"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-dev-*",
+          "arn:aws:s3:::coa-dev-*/*"
+        ]
+      },
+      {
+        "Action": "bedrock:InvokeModel",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:*:${AccountId}:inference-profile/*"
+        ]
+      }
+    ]
+  },
+  "statementCount": 2
+}

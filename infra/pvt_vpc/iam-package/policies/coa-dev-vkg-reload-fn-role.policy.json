@@ -1,0 +1,93 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:CreateService"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ecs:${Region}:${AccountId}:service/arn:aws:ecs:${Region}:${AccountId}:cluster/coa-dev-*/*"
+    },
+    {
+      "Action": "ecs:ListServices",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:${Region}:${AccountId}:cluster/coa-dev-*"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:DescribeTaskDefinition"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": "iam:PassRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:iam::${AccountId}:role/coa-dev-*",
+        "arn:aws:iam::${AccountId}:role/coa-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "servicediscovery:CreateService",
+        "servicediscovery:ListServices"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "application-autoscaling:RegisterScalableTarget",
+        "application-autoscaling:PutScalingPolicy"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:application-autoscaling:${Region}:${AccountId}:scalable-target/*"
+    },
+    {
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:logs:${Region}:${AccountId}:log-group:/ecs/vkg-*",
+        "arn:aws:logs:${Region}:${AccountId}:log-group:/ecs/vkg-*:*"
+      ]
+    },
+    {
+      "Action": [
+        "ssm:DescribeParameters",
+        "ssm:GetParameters",
+        "ssm:GetParameter",
+        "ssm:GetParameterHistory"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameterarn:aws:ssm:${Region}:${AccountId}:parameter/*"
+    },
+    {
+      "Action": "cloudwatch:PutMetricData",
+      "Condition": {
+        "StringEquals": {
+          "cloudwatch:namespace": "COA/VKG"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*"
+    }
+  ]
+}

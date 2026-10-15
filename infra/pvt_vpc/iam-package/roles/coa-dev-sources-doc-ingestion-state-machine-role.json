@@ -1,0 +1,69 @@
+{
+  "roleName": "coa-dev-sources-doc-ingestion-state-machine-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "SourcesDocIngestionStateMachineRoleE2EFA786",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "states.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "dynamodb:UpdateItem",
+        "Effect": "Allow",
+        "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "ecs:RunTask",
+        "Effect": "Allow",
+        "Resource": "arn:arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*:arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*:arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*:arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*:arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*/arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-dev-*:*"
+      },
+      {
+        "Action": [
+          "ecs:StopTask",
+          "ecs:DescribeTasks"
+        ],
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "iam:PassRole",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:iam::${AccountId}:role/coa-dev-*",
+          "arn:aws:iam::${AccountId}:role/coa-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "events:PutTargets",
+          "events:PutRule",
+          "events:DescribeRule"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:events:${Region}:${AccountId}:rule/StepFunctionsGetEventsForECSTaskRule"
+      }
+    ]
+  },
+  "statementCount": 6
+}

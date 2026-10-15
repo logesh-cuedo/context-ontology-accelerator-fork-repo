@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "states:StartExecution",
+      "Effect": "Allow",
+      "Resource": "arn:aws:states:${Region}:${AccountId}:stateMachine:coa-dev-*"
+    },
+    {
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueUrl",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-dev-*"
+    }
+  ]
+}

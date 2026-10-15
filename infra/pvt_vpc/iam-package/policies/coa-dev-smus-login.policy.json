@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "iam:PassRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "datazone.amazonaws.com"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "${DomainExecutionRole3CEB155A.Arn}",
+      "Sid": "IAMPassRoleStatement"
+    }
+  ]
+}

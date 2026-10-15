@@ -1,0 +1,146 @@
+{
+  "roleName": "coa-dev-federated-catalog-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "FederatedCatalogRoleF7267A86",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "glue.amazonaws.com"
+        }
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lakeformation.amazonaws.com"
+        }
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-*"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "s3:GetObject*",
+          "s3:GetBucket*",
+          "s3:List*",
+          "s3:DeleteObject*",
+          "s3:PutObject",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging",
+          "s3:Abort*"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-dev-*",
+          "arn:aws:s3:::coa-dev-*/*"
+        ]
+      },
+      {
+        "Action": "glue:GetConnection",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:glue:${Region}:${AccountId}:catalog",
+          "arn:aws:glue:${Region}:${AccountId}:connection/coadevds_*"
+        ]
+      },
+      {
+        "Action": "glue:ManagedConnector",
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "GlueManagedConnectorExecution"
+      },
+      {
+        "Action": "secretsmanager:GetSecretValue",
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceAccount": "${AccountId}"
+          },
+          "Null": {
+            "secretsmanager:ResourceTag/coa:namespace": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:*:*:secret:*",
+        "Sid": "ReadCredentialSecretInAccount"
+      },
+      {
+        "Action": "secretsmanager:GetSecretValue",
+        "Condition": {
+          "StringNotEquals": {
+            "aws:ResourceAccount": "${AccountId}"
+          },
+          "Null": {
+            "aws:ResourceAccount": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:*:*:secret:*",
+        "Sid": "ReadCredentialSecretCrossAccount"
+      },
+      {
+        "Action": "kms:Decrypt",
+        "Condition": {
+          "StringLike": {
+            "kms:ViaService": "secretsmanager.*.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "DecryptCredentialSecret"
+      },
+      {
+        "Action": [
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeAvailabilityZones"
+        ],
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "Ec2NetworkDescribe"
+      },
+      {
+        "Action": [
+          "ec2:CreateNetworkInterface",
+          "ec2:DeleteNetworkInterface",
+          "ec2:CreateTags"
+        ],
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "Ec2NetworkInterfaceManagement"
+      },
+      {
+        "Action": "ec2:CreateNetworkInterfacePermission",
+        "Condition": {
+          "StringEquals": {
+            "ec2:AuthorizedService": "glue.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:ec2:${Region}:${AccountId}:network-interface/*",
+        "Sid": "Ec2CreateNetworkInterfacePermissionForGlue"
+      }
+    ]
+  },
+  "statementCount": 9
+}

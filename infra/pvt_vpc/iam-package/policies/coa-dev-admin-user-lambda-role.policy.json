@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminDeleteUser",
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:DeleteGroup"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/*"
+    }
+  ]
+}

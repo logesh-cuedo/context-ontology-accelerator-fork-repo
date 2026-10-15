@@ -12,6 +12,7 @@ import {
   DEFAULT_RESOURCE_PREFIX,
   DEFAULT_ENV,
 } from "../lib/constants";
+import { resolveStaging } from "../lib/pvt-vpc-config";
 import { Paths } from "../lib/paths";
 import { SsmConfig, CustomDomainConfig, IdpType } from "../lib/types";
 import {
@@ -49,7 +50,30 @@ import {
   VkgStack,
 } from "../lib/stacks/services";
 
-const app = new cdk.App();
+/**
+ * Staging for Lambda zips and container images.
+ *
+ * `cdk bootstrap` creates a bucket, a repository AND five IAM roles that the
+ * deployment assumes. An account that denies `iam:CreateRole` cannot run it, so
+ * `staging` in pvt_vpc/config.json names a bucket and repository created by
+ * hand — neither needs any IAM permission — and the app switches to
+ * `CliCredentialsStackSynthesizer`, which publishes assets with the caller's
+ * own credentials and assumes no role at all.
+ *
+ * Read before the App exists, so it comes from the file rather than context.
+ * Absent (the shipped state) keeps the default synthesizer and standard
+ * bootstrap, so the original flow is untouched.
+ */
+const staging = resolveStaging();
+
+const app = new cdk.App({
+  defaultStackSynthesizer: staging
+    ? new cdk.CliCredentialsStackSynthesizer({
+        fileAssetsBucketName: staging.bucketName,
+        imageAssetsRepositoryName: staging.repositoryName,
+      })
+    : undefined,
+});
 
 const prefix =
   (app.node.tryGetContext(CTX_RESOURCE_PREFIX) as string) ??

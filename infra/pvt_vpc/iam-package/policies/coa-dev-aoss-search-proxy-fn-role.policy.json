@@ -1,0 +1,10 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "aoss:APIAccessAll",
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "roleName": "coa-dev-web-custom-resource-role",
+  "stack": "coa-dev-web",
+  "logicalId": "WebCustomResourceRole04C3BE63",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "cognito-idp:UpdateUserPoolClient",
+        "Effect": "Allow",
+        "Resource": "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/${SsmParameterValuecoauserpoolidC96584B6F00A464EAD1953AFF4B05118Parameter}"
+      },
+      {
+        "Action": [
+          "apigateway:PUT",
+          "apigateway:PATCH",
+          "apigateway:POST"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+      },
+      {
+        "Action": [
+          "apigateway:PUT",
+          "apigateway:PATCH",
+          "apigateway:POST"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+      },
+      {
+        "Action": "apigateway:POST",
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/arn:aws:*:${Region}:${AccountId}:*/*"
+      }
+    ]
+  },
+  "statementCount": 4
+}

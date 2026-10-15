@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "bedrock-agentcore:InvokeAgentRuntime",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/*",
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/*/*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+    }
+  ]
+}

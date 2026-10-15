@@ -1,0 +1,157 @@
+{
+  "roleName": "coa-dev-bulk-review-worker-fn-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "BulkReviewWorkerFnServiceRole4F2D24DA",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "sqs:ReceiveMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueUrl",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-dev-*"
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      },
+      {
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-dev-*"
+      },
+      {
+        "Action": [
+          "s3:GetObject*",
+          "s3:GetBucket*",
+          "s3:List*",
+          "s3:DeleteObject*",
+          "s3:PutObject",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging",
+          "s3:Abort*"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-dev-*",
+          "arn:aws:s3:::coa-dev-*/*"
+        ]
+      }
+    ]
+  },
+  "statementCount": 10
+}

@@ -1,0 +1,41 @@
+{
+  "roleName": "coa-dev-lakeformation-admin-framework-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "FederationProvisionerLfAdminLakeformationAdminFrameworkRole805B9710",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:GetFunction",
+        "Effect": "Allow",
+        "Resource": "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*"
+      }
+    ]
+  },
+  "statementCount": 2
+}

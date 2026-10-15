@@ -1,0 +1,84 @@
+{
+  "roleName": "coa-dev-deletion-pipeline-state-machine-role",
+  "stack": "coa-dev-namespace",
+  "logicalId": "DeletionPipelineStateMachineRole7CAE91BE",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "states.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets"
+        ],
+        "Effect": "Allow",
+        "Resource": "*"
+      }
+    ]
+  },
+  "statementCount": 7
+}

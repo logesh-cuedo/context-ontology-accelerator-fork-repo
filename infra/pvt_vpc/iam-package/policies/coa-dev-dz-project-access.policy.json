@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "datazone:CreateAsset",
+        "datazone:CreateAssetRevision",
+        "datazone:CreateFormType",
+        "datazone:DeleteAsset",
+        "datazone:DeleteProject",
+        "datazone:GetAsset",
+        "datazone:GetFormType",
+        "datazone:GetProject",
+        "datazone:ListAssets",
+        "datazone:Search",
+        "datazone:SearchListings"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:datazone:${Region}:${AccountId}:domain/${SMUSDomain.Id}",
+        "arn:aws:datazone:${Region}:${AccountId}:domain/${SMUSDomain.Id}/*"
+      ]
+    }
+  ]
+}

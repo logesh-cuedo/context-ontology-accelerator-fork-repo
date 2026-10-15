@@ -1,0 +1,394 @@
+{
+  "roleName": "coa-dev-agent-core-runtime-exec-role",
+  "stack": "coa-dev-serve",
+  "logicalId": "AgentCoreRuntimeExecutionRoleB22B0632",
+  "nameIsExplicit": false,
+  "description": "Execution role for Bedrock Agent Core Runtime",
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "${AccountId}"
+          },
+          "ArnLike": {
+            "aws:SourceArn": "arn:aws:bedrock-agentcore:${Region}:${AccountId}:runtime/coa_dev_context_manager*"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "bedrock-agentcore.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "logs:DescribeLogStreams",
+          "logs:CreateLogGroup"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*",
+        "Sid": "LogGroupAccess"
+      },
+      {
+        "Action": "logs:DescribeLogGroups",
+        "Effect": "Allow",
+        "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:*",
+        "Sid": "DescribeLogGroups"
+      },
+      {
+        "Action": [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+        "Sid": "LogStreamAccess"
+      },
+      {
+        "Action": [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets"
+        ],
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "XRayAccess"
+      },
+      {
+        "Action": "cloudwatch:PutMetricData",
+        "Condition": {
+          "StringEquals": {
+            "cloudwatch:namespace": "bedrock-agentcore"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "CloudWatchMetrics"
+      },
+      {
+        "Action": [
+          "bedrock-agentcore:GetWorkloadAccessToken",
+          "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+          "bedrock-agentcore:GetWorkloadAccessTokenForUserId"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:bedrock-agentcore:${Region}:${AccountId}:workload-identity-directory/default",
+          "arn:aws:bedrock-agentcore:${Region}:${AccountId}:workload-identity-directory/default/workload-identity/*"
+        ],
+        "Sid": "GetAgentAccessToken"
+      },
+      {
+        "Action": "bedrock-agentcore:CreateEvent",
+        "Effect": "Allow",
+        "Resource": "arn:aws:bedrock-agentcore:${Region}:${AccountId}:memory/*"
+      },
+      {
+        "Action": [
+          "bedrock-agentcore:GetEvent",
+          "bedrock-agentcore:ListEvents",
+          "bedrock-agentcore:ListActors",
+          "bedrock-agentcore:ListSessions",
+          "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:RetrieveMemoryRecords",
+          "bedrock-agentcore:ListMemoryRecords"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:bedrock-agentcore:${Region}:${AccountId}:memory/*"
+      },
+      {
+        "Action": "ecr:GetAuthorizationToken",
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:ecr:${Region}:${AccountId}:repository/cdk-hnb659fds-container-assets-${AccountId}-${Region}"
+      },
+      {
+        "Action": "ssm:GetParameter",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/coa/*"
+      },
+      {
+        "Action": [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:ApplyGuardrail"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:bedrock:*:${AccountId}:inference-profile/*",
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:${Region}:${AccountId}:guardrail/*"
+        ]
+      },
+      {
+        "Action": "neptune-db:ReadDataViaQuery",
+        "Effect": "Allow",
+        "Resource": "arn:aws:neptune-db:${Region}:${AccountId}:arn:aws:rds:${Region}:${AccountId}:cluster:coa-dev-*/*"
+      },
+      {
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:BatchGetItem"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-sources",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-sources/index/*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:DeleteItem",
+          "dynamodb:UpdateItem"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:GetBucketLocation",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+          "s3:DeleteObject"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-dev-*",
+          "arn:aws:s3:::coa-dev-*/*",
+          "arn:aws:s3:::arn:aws:s3:::coa-dev-*",
+          "arn:aws:s3:::arn:aws:s3:::coa-dev-*/*",
+          "arn:aws:s3:::coa-dev-demo-data",
+          "arn:aws:s3:::coa-dev-demo-data/*"
+        ]
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-*",
+          "arn:aws:s3:::coa-*/*"
+        ]
+      },
+      {
+        "Action": [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:GetWorkGroup",
+          "athena:GetDataCatalog"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:athena:${Region}:${AccountId}:workgroup/*",
+          "arn:aws:athena:${Region}:${AccountId}:datacatalog/*"
+        ]
+      },
+      {
+        "Action": [
+          "redshift-data:ExecuteStatement",
+          "redshift-data:DescribeStatement",
+          "redshift-data:GetStatementResult",
+          "redshift-data:ListStatements"
+        ],
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "redshift-serverless:GetCredentials",
+        "Effect": "Allow",
+        "Resource": "arn:aws:redshift-serverless:${Region}:${AccountId}:workgroup/*"
+      },
+      {
+        "Action": [
+          "glue:GetCatalog",
+          "glue:GetDatabase",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetPartitions",
+          "glue:GetConnection",
+          "glue:GetUnfilteredTableMetadata",
+          "glue:GetUnfilteredPartitionMetadata"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:glue:${Region}:${AccountId}:catalog",
+          "arn:aws:glue:${Region}:${AccountId}:catalog/*",
+          "arn:aws:glue:${Region}:${AccountId}:database/*",
+          "arn:aws:glue:${Region}:${AccountId}:table/*/*",
+          "arn:aws:glue:${Region}:${AccountId}:connection/coadevds_*",
+          "arn:aws:glue:${Region}:${AccountId}:catalog/coadevds_*",
+          "arn:aws:glue:${Region}:${AccountId}:database/coadevds_*/*",
+          "arn:aws:glue:${Region}:${AccountId}:table/coadevds_*/*/*"
+        ]
+      },
+      {
+        "Action": "lakeformation:GetDataAccess",
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+          "s3:DeleteObject"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-dev-athena-spill-${AccountId}",
+          "arn:aws:s3:::coa-dev-athena-spill-${AccountId}/*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringEquals": {
+            "aws:ResourceTag/coa:connector": "true"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:lambda:${Region}:*:function:*",
+        "Sid": "AthenaFederationConnectorInvoke"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringNotEquals": {
+            "aws:ResourceTag/coa:connector": "true"
+          }
+        },
+        "Effect": "Deny",
+        "Resource": "arn:aws:lambda:*:${AccountId}:function:*",
+        "Sid": "DenyAthenaInvokeOfUntaggedFunctions"
+      },
+      {
+        "Action": "s3:GetObject",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringEquals": {
+            "aws:RequestedRegion": "${Region}"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::*/connectors/*/spills/*",
+        "Sid": "AthenaFederationSpillRead"
+      },
+      {
+        "Action": "s3:GetBucketLocation",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringEquals": {
+            "aws:RequestedRegion": "${Region}"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::*",
+        "Sid": "AthenaFederationSpillBucketLocation"
+      },
+      {
+        "Action": "s3:ListBucket",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringEquals": {
+            "aws:RequestedRegion": "${Region}"
+          },
+          "StringLike": {
+            "s3:prefix": "connectors/*/spills/*"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::*",
+        "Sid": "AthenaFederationSpillList"
+      },
+      {
+        "Action": "kms:Decrypt",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": "s3.${Region}.amazonaws.com",
+            "aws:ResourceTag/coa:connector-spill": "true"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:kms:${Region}:*:key/*",
+        "Sid": "AthenaFederationSpillDecryptViaS3"
+      },
+      {
+        "Action": "secretsmanager:GetSecretValue",
+        "Condition": {
+          "Null": {
+            "secretsmanager:ResourceTag/coa:namespace": "true"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:${Region}:${AccountId}:secret:coa-*",
+        "Sid": "ReadPlatformSecrets"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-dev-*:*"
+        ]
+      },
+      {
+        "Action": "aoss:APIAccessAll",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      }
+    ]
+  },
+  "statementCount": 32
+}

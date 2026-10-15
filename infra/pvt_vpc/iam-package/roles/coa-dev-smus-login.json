@@ -1,0 +1,39 @@
+{
+  "roleName": "coa-dev-smus-login",
+  "stack": "coa-dev-namespace",
+  "logicalId": "DomainLoginRole6584B22D",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::${AccountId}:role/Admin"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/SageMakerStudioAdminIAMConsolePolicy"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "iam:PassRole",
+        "Condition": {
+          "StringEquals": {
+            "iam:PassedToService": "datazone.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "${DomainExecutionRole3CEB155A.Arn}",
+        "Sid": "IAMPassRoleStatement"
+      }
+    ]
+  },
+  "statementCount": 1
+}

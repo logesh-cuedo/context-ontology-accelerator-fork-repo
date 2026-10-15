@@ -1,0 +1,191 @@
+{
+  "roleName": "coa-dev-namespace-api-fn-role",
+  "stack": "coa-dev-namespace",
+  "logicalId": "NamespaceApiFnServiceRole0F5FF352",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-*"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": "dynamodb:Query",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-sources/index/ByNamespace",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-metric-import-jobs"
+        ]
+      },
+      {
+        "Action": "dynamodb:TransactWriteItems",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "datazone:CreateProject",
+          "datazone:CreateProjectMembership",
+          "datazone:DeleteProject"
+        ],
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "iam:GetRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::${AccountId}:role/coa-dev-*"
+      },
+      {
+        "Action": "ssm:GetParameter",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:ssm:${Region}:${AccountId}:parameter/coa/smus/*",
+          "arn:aws:ssm:${Region}:${AccountId}:parameter/coa/query/*"
+        ]
+      },
+      {
+        "Action": [
+          "athena:CreateWorkGroup",
+          "athena:GetWorkGroup",
+          "athena:TagResource"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:athena:${Region}:${AccountId}:workgroup/coa-dev-*"
+      },
+      {
+        "Action": [
+          "ecs:DescribeServices",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks"
+        ],
+        "Condition": {
+          "ArnLike": {
+            "ecs:cluster": "arn:aws:ecs:${Region}:${AccountId}:cluster/coa-dev-*"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "states:StartExecution",
+        "Effect": "Allow",
+        "Resource": "arn:aws:states:${Region}:${AccountId}:stateMachine:coa-dev-*"
+      }
+    ]
+  },
+  "statementCount": 14
+}

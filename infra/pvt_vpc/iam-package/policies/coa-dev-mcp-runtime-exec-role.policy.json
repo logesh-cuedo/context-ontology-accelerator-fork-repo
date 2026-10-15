@@ -1,0 +1,112 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "logs:DescribeLogStreams",
+        "logs:CreateLogGroup"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*",
+      "Sid": "LogGroupAccess"
+    },
+    {
+      "Action": "logs:DescribeLogGroups",
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:*",
+      "Sid": "DescribeLogGroups"
+    },
+    {
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:${Region}:${AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+      "Sid": "LogStreamAccess"
+    },
+    {
+      "Action": [
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "XRayAccess"
+    },
+    {
+      "Action": "cloudwatch:PutMetricData",
+      "Condition": {
+        "StringEquals": {
+          "cloudwatch:namespace": "bedrock-agentcore"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "CloudWatchMetrics"
+    },
+    {
+      "Action": [
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+        "bedrock-agentcore:GetWorkloadAccessTokenForUserId"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:bedrock-agentcore:${Region}:${AccountId}:workload-identity-directory/default",
+        "arn:aws:bedrock-agentcore:${Region}:${AccountId}:workload-identity-directory/default/workload-identity/*"
+      ],
+      "Sid": "GetAgentAccessToken"
+    },
+    {
+      "Action": "ecr:GetAuthorizationToken",
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ecr:${Region}:${AccountId}:repository/cdk-hnb659fds-container-assets-${AccountId}-${Region}"
+    },
+    {
+      "Action": "ssm:GetParameter",
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/coa/*"
+    },
+    {
+      "Action": [
+        "bedrock-agentcore:InvokeAgentRuntime",
+        "bedrock-agentcore:InvokeAgentRuntimeForUser"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:bedrock-agentcore:${Region}:${AccountId}:runtime/*"
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/*",
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:BatchGetItem"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/index/*"
+      ]
+    }
+  ]
+}

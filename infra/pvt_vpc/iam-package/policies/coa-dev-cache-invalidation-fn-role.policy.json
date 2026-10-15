@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-dev-*"
+    },
+    {
+      "Action": "dynamodb:ListStreams",
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "dynamodb:DescribeStream",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/stream/*"
+    },
+    {
+      "Action": [
+        "dynamodb:DescribeStream",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-dev-*/stream/*"
+    }
+  ]
+}

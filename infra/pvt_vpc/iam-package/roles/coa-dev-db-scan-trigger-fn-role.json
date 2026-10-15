@@ -1,0 +1,45 @@
+{
+  "roleName": "coa-dev-db-scan-trigger-fn-role",
+  "stack": "coa-dev-sources",
+  "logicalId": "DbScanTriggerFnServiceRoleD7798156",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "states:StartExecution",
+        "Effect": "Allow",
+        "Resource": "arn:aws:states:${Region}:${AccountId}:stateMachine:coa-dev-*"
+      },
+      {
+        "Action": [
+          "sqs:ReceiveMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueUrl",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-dev-*"
+      }
+    ]
+  },
+  "statementCount": 2
+}
