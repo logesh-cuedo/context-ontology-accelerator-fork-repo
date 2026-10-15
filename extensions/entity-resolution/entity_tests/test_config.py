@@ -84,3 +84,16 @@ class TestLoadConfig:
     def test_malformed_parameter_raises(self):
         with pytest.raises(EntityConfigError):
             load_config(_ssm({"/cuedo/entities/default": "{}"}), "/cuedo", "ns1")
+
+
+@pytest.mark.unit
+class TestKindInfos:
+    def test_companies_and_sectors_share_one_shape(self):
+        company, sector = sample_config().kind_infos()
+        assert (company.type, company.is_group, company.table, company.table_column, company.sql_column) == (
+            "company", False, "sectors", "company_name", "company_name",
+        )  # fmt: skip
+        assert (sector.type, sector.is_group, sector.table, sector.table_column, sector.sql_column) == (
+            "sector", True, "sectors", "cd_sector", "sector",
+        )  # fmt: skip
+        assert sector.parent == "company" and company.id_column == "company_id" and sector.id_column == ""

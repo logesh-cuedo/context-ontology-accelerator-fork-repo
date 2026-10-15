@@ -31,6 +31,7 @@ def _env(monkeypatch):
         "OSS_COLLECTION_NAME": "coll",
         "OSS_ENDPOINT": "https://x.aoss.amazonaws.com",
         "ATHENA_WORKGROUP_PREFIX": "cuedo-dev-",
+        "ENTITY_BUCKET": "bkt",
         "SSM_PREFIX": "/cuedo",
         "AWS_REGION": "us-east-1",
     }.items():
@@ -67,11 +68,13 @@ def _glue(tables):
     return glue
 
 
-def _ssm(config=None):
+def _ssm(config=None, pointer=None):
     ssm = MagicMock()
     ssm.exceptions.ParameterNotFound = type("ParameterNotFound", (Exception,), {})
 
     def get_parameter(Name):  # noqa: N803
+        if "/entities/_active/" in Name and pointer is not None and Name.endswith(NS):
+            return {"Parameter": {"Value": json.dumps(pointer)}}
         if Name == "/cuedo/config":
             return {"Parameter": {"Value": json.dumps({"bedrockEmbedModelId": "titan"})}}
         if Name == "/cuedo/entities/default" and config is not None:
@@ -106,13 +109,14 @@ class TestDiscovery:
 
 @pytest.mark.unit
 class TestBuild:
-    def _run(self, *, config=None, tables=None, read=None):
+    def _run(self, *, config=None, tables=None, read=None, previous=None):
         ddb = _dynamodb([GLUE_SOURCE])
         glue = _glue(tables if tables is not None else {("shravas_db_silver", "sectors"): SECTOR_COLUMNS})
-        ssm = _ssm(sample_document() if config is None else config)
+        ssm = _ssm(sample_document() if config is None else config, pointer=previous)
+        self.ssm, self.s3, self.aoss = ssm, MagicMock(), MagicMock()
 
         def client(service, **_kw):
-            return {"glue": glue, "athena": MagicMock(), "ssm": ssm}[service]
+            return {"glue": glue, "athena": MagicMock(), "ssm": ssm, "s3": self.s3}[service]
 
         rows = [{"company_id": "1", "company_name": "TCS Ltd.", "cd_sector": "IT", "cd_subsector": ""}]
         with (
@@ -120,7 +124,7 @@ class TestBuild:
             patch.object(h.boto3, "client", side_effect=client),
             patch.object(h, "read_rows", read or MagicMock(return_value=rows)) as read_rows,
             patch("coa_common.embeddings.BedrockEmbedder") as embedder,
-            patch("coa_common.opensearch.client.AossVectorClient"),
+            patch("coa_common.opensearch.client.AossVectorClient", return_value=self.aoss),
             patch.object(h, "write_index", side_effect=lambda docs, **kw: len(docs)) as write,
         ):
             embedder.return_value.dimensions = 1024
@@ -133,8 +137,22 @@ class TestBuild:
         assert result["by_type"] == {"company": 1, "sector": 1}
         assert read_rows.call_args.kwargs["database"] == "shravas_db_silver"
         assert read_rows.call_args.kwargs["workgroup"] == "cuedo-dev-wg"
-        assert write.call_args.kwargs["index"] == f"coll-entities-{NS}"
+        index = write.call_args.kwargs["index"]
+        assert index.startswith(f"coll-entities-{NS}-v") and write.call_args.kwargs["recreate"] is False
         assert write.call_args.kwargs["embed_model_id"] == "titan"
+
+    def test_publishes_name_list_then_pointer_and_retires_old_versions(self):
+        previous = {"index": f"coll-entities-{NS}-v1", "names": f"s3://bkt/entities/{NS}/v1.json", "version": 1}
+        result, _, _ = self._run(previous=previous)
+        put = self.s3.put_object.call_args.kwargs
+        assert put["Bucket"] == "bkt" and put["Key"].startswith(f"entities/{NS}/v")
+        catalog = json.loads(put["Body"])
+        assert ["company", "1", "TCS Ltd.", {"cd_sector": "IT"}] in catalog["entities"]
+        pointer = json.loads(self.ssm.put_parameter.call_args.kwargs["Value"])
+        assert pointer["index"] == result["index"] and pointer["names"] == f"s3://bkt/{put['Key']}"
+        deleted = [c.args[0] for c in self.aoss.delete_index.call_args_list]
+        assert deleted == [f"coll-entities-{NS}", f"coll-entities-{NS}-v1"]
+        self.s3.delete_object.assert_called_once_with(Bucket="bkt", Key=f"entities/{NS}/v1.json")
 
     def test_skips_without_config(self):
         result, read_rows, _ = self._run(config={})
@@ -154,20 +172,31 @@ class TestBuild:
 
 @pytest.mark.unit
 class TestSweepAndDispatch:
-    def test_sweep_deletes_only_orphans(self):
+    def _sweep(self, indexes, pointer=None):
         aoss = MagicMock()
-        aoss.raw_client.return_value.cat.indices.return_value = [
-            {"index": f"coll-entities-{NS}"},
-            {"index": "coll-entities-gone"},
-        ]
+        aoss.raw_client.return_value.cat.indices.return_value = [{"index": i} for i in indexes]
         aoss.delete_index.return_value = True
+        ssm, s3 = _ssm(None, pointer=pointer), MagicMock()
+        s3.list_objects_v2.return_value = {"Contents": [{"Key": "entities/gone/v5.json"}]}
         with (
             patch("coa_common.opensearch.client.AossVectorClient", return_value=aoss),
             patch.object(h.boto3, "resource", return_value=_dynamodb([])),
+            patch.object(h.boto3, "client", side_effect=lambda svc, **_k: {"ssm": ssm, "s3": s3}[svc]),
         ):
-            result = h.handler({"detail-type": "Scheduled Event"}, None)
-        assert result == {"status": "swept", "deleted": ["coll-entities-gone"]}
-        aoss.delete_index.assert_called_once_with("coll-entities-gone")
+            return h.handler({"detail-type": "Scheduled Event"}, None), ssm, s3
+
+    def test_sweep_deletes_deleted_namespaces_with_their_pointer_and_names(self):
+        result, ssm, s3 = self._sweep([f"coll-entities-{NS}", "coll-entities-gone-v5"])
+        assert result == {"status": "swept", "deleted": ["coll-entities-gone-v5"]}
+        ssm.delete_parameter.assert_called_once_with(Name="/cuedo/entities/_active/gone")
+        s3.delete_object.assert_called_once_with(Bucket="bkt", Key="entities/gone/v5.json")
+
+    def test_sweep_keeps_the_active_version_and_drops_old_ones(self):
+        active = {"index": f"coll-entities-{NS}-v2000000000", "names": "", "version": 2000000000}
+        result, _, _ = self._sweep(
+            [f"coll-entities-{NS}-v2000000000", f"coll-entities-{NS}-v100", f"coll-entities-{NS}"], pointer=active
+        )
+        assert result["deleted"] == [f"coll-entities-{NS}-v100", f"coll-entities-{NS}"]
 
     def test_unknown_event_is_ignored(self):
         assert h.handler({"detail-type": "something.else"}, None)["status"] == "ignored"

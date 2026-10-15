@@ -58,8 +58,40 @@ _ACRONYM_SKIP = {
 
 
 def index_name(collection: str, namespace: str) -> str:
-    """``{collection}-entities-{namespace}`` — one entity index per namespace."""
+    """``{collection}-entities-{namespace}`` — the namespace's base (legacy) index name."""
     return f"{collection}-entities-{namespace}"
+
+
+def versioned_index_name(collection: str, namespace: str, version: int) -> str:
+    """``{collection}-entities-{namespace}-v{version}`` — one build of the index.
+
+    Each build writes a NEW version and the active pointer switches only once it
+    is complete, so a rebuild never leaves serve searching an empty index.
+    """
+    return f"{index_name(collection, namespace)}-v{version}"
+
+
+_VERSION = re.compile(r"^(?P<ns>.+?)(?:-v(?P<v>\d+))?$")
+
+
+def parse_index_name(collection: str, index: str) -> tuple[str, int | None] | None:
+    """(namespace, version or None) for an entity index name, or None if it is not one."""
+    prefix = index_name(collection, "")
+    if not index.startswith(prefix):
+        return None
+    m = _VERSION.match(index[len(prefix) :])
+    if not m or not m.group("ns"):
+        return None
+    return m.group("ns"), int(m.group("v")) if m.group("v") else None
+
+
+def name_catalog(docs: list[tuple[str, dict]]) -> dict:
+    """The compact name list serve's name matcher loads: [kind, key, name, attrs] per entity."""
+    entities = []
+    for _, d in docs:
+        ctx = json.loads(d.get("context_text") or "{}")
+        entities.append([d["entity_type"], d["entity_uri"], ctx.get("name") or d["entity_uri"], ctx.get("attrs") or {}])
+    return {"version": 1, "entities": entities}
 
 
 def acronyms(name: str) -> list[str]:
@@ -155,16 +187,55 @@ def _wait_until_deleted(aoss: Any, index: str) -> None:
     time.sleep(_ROUTING_SETTLE_S)
 
 
+def _wait_until_ready(aoss: Any, index: str) -> None:
+    """Block until a just-created ``index`` exists (bounded), then let AOSS routing settle.
+
+    A write sent the instant the index is created can be rejected for the whole
+    first chunk (seen as 10 docs failing with a terminal status).
+    """
+    deadline = time.monotonic() + _DELETE_WAIT_S
+    while time.monotonic() < deadline:
+        try:
+            if aoss.raw_client().indices.exists(index=index):
+                break
+        except Exception:  # a transient probe error is not worth failing the build
+            break
+        time.sleep(_DELETE_POLL_S)
+    time.sleep(_ROUTING_SETTLE_S)
+
+
+_BULK_ATTEMPTS = 4
+
+
+def _rejected_docs(exc: Exception) -> list[dict]:
+    """The documents a PartialIndexError reports as not indexed (their ``data``)."""
+    out = []
+    for item in getattr(exc, "errors", None) or []:
+        (result,) = item.values()
+        if isinstance(result.get("data"), dict):
+            out.append({k: v for k, v in result["data"].items() if k not in ("_op_type", "_index")})
+    return out
+
+
 def _bulk(aoss: Any, index: str, docs: list[dict]) -> None:
-    """Bulk-write, retrying once if AOSS still routes to a just-deleted index."""
-    try:
-        aoss.bulk_index(index, docs)
-    except Exception as exc:
-        if "index_not_found" not in str(exc):
-            raise
-        time.sleep(_ROUTING_SETTLE_S * 3)
-        aoss.ensure_index(index)
-        aoss.bulk_index(index, docs)
+    """Bulk-write; re-send only the rejected docs with back-off (no duplicates).
+
+    AOSS assigns ``_id`` itself, so re-sending a whole chunk would duplicate the
+    documents that did land — only the ones the error lists are retried.
+    """
+    pending = docs
+    for attempt in range(_BULK_ATTEMPTS):
+        try:
+            aoss.bulk_index(index, pending)
+            return
+        except Exception as exc:
+            rejected = _rejected_docs(exc)
+            transient = "index_not_found" in str(exc) or type(exc).__name__ == "PartialIndexError"
+            if attempt == _BULK_ATTEMPTS - 1 or not transient or (not rejected and "index_not_found" not in str(exc)):
+                raise
+            time.sleep(_ROUTING_SETTLE_S * (attempt + 1))
+            aoss.ensure_index(index)
+            pending = rejected or pending
 
 
 def write_index(
@@ -187,6 +258,7 @@ def write_index(
         say(f"dropped existing {index}")
         _wait_until_deleted(aoss, index)
     aoss.ensure_index(index)
+    _wait_until_ready(aoss, index)
 
     written = 0
     for start in range(0, len(docs), BULK_CHUNK):

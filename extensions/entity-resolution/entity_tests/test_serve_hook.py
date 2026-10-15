@@ -33,11 +33,17 @@ BAJAJ_AUTO = EntityCandidate(kind="company", key="101", name="Bajaj Auto Ltd.", 
 CLARIFY = f"Which?\n\n1. Bajaj Auto Ltd. (Automobile)\n2. Bajaj Finance Ltd. (Finance)\n\n{CLARIFICATION_MARKER}"
 
 
-def _ssm(config: dict | None) -> MagicMock:
+POINTER = {"index": "coll-entities-ns1-v7", "names": "s3://bkt/entities/ns1/v7.json", "version": 7}
+CATALOG = {"entities": [["company", "201", "Grindwell Norton Ltd.", {"cd_sector": "Abrasives"}]]}
+
+
+def _ssm(config: dict | None, pointer: dict | None = None) -> MagicMock:
     ssm = MagicMock()
     ssm.exceptions.ParameterNotFound = type("ParameterNotFound", (Exception,), {})
 
     def get_parameter(Name):  # noqa: N803
+        if Name.endswith("/_active/ns1") and pointer is not None:
+            return {"Parameter": {"Value": json.dumps(pointer)}}
         if config is None or not Name.endswith("/default"):
             raise ssm.exceptions.ParameterNotFound()
         return {"Parameter": {"Value": json.dumps(config)}}
@@ -46,10 +52,19 @@ def _ssm(config: dict | None) -> MagicMock:
     return ssm
 
 
-def _hook(resolution: EntityResolution, config: dict | None = None) -> tuple[EntityHook, AsyncMock]:
+def _s3() -> MagicMock:
+    s3 = MagicMock()
+    s3.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(CATALOG).encode())}
+    return s3
+
+
+def _hook(
+    resolution: EntityResolution, config: dict | None = None, pointer: dict | None = None
+) -> tuple[EntityHook, AsyncMock]:
     resolver = AsyncMock()
     resolver.resolve.return_value = resolution
-    return EntityHook(resolver, _ssm(sample_document() if config is None else config), "/cuedo"), resolver
+    ssm = _ssm(sample_document() if config is None else config, pointer)
+    return EntityHook(resolver, ssm, _s3(), "/cuedo", "coll"), resolver
 
 
 @pytest.mark.unit
@@ -65,7 +80,27 @@ class TestEntityHook:
     async def test_no_entity_still_gets_fallback_rules(self):
         hook, _ = _hook(EntityResolution(status="no_entity"))
         out = await hook.before_tier2("top 10 by pat", "ns1", [0.1], TraceCollector(), None)
-        assert "Entity name filters" in out.sql_context
+        assert "Entity filters" in out.sql_context
+
+    async def test_searches_the_active_version_with_its_name_list(self):
+        hook, resolver = _hook(EntityResolution(status="no_entity"), pointer=POINTER)
+        await hook.before_tier2("norton revenue", "ns1", [0.1], TraceCollector(), None)
+        kwargs = resolver.resolve.call_args.kwargs
+        assert kwargs["index"] == "coll-entities-ns1-v7"
+        assert [e.name for e in kwargs["matcher"].entries] == ["Grindwell Norton Ltd."]
+        hook._s3.get_object.assert_called_once_with(Bucket="bkt", Key="entities/ns1/v7.json")
+
+    async def test_name_list_loaded_once_per_version(self):
+        hook, _ = _hook(EntityResolution(status="no_entity"), pointer=POINTER)
+        for _ in range(3):
+            await hook.before_tier2("q", "ns1", [0.1], TraceCollector(), None)
+        assert hook._s3.get_object.call_count == 1
+
+    async def test_without_a_pointer_uses_the_legacy_index_and_no_names(self):
+        hook, resolver = _hook(EntityResolution(status="no_entity"))
+        await hook.before_tier2("q", "ns1", [0.1], TraceCollector(), None)
+        assert resolver.resolve.call_args.kwargs["index"] == "coll-entities-ns1"
+        assert resolver.resolve.call_args.kwargs["matcher"] is None
 
     async def test_without_config_the_step_is_absent(self):
         hook, resolver = _hook(EntityResolution(status="found"), config={})

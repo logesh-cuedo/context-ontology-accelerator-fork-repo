@@ -95,7 +95,7 @@ def _no_sleep(monkeypatch):
 class TestWriteIndex:
     def test_retries_once_when_aoss_still_routes_to_the_deleted_index(self):
         aoss = MagicMock()
-        aoss.raw_client.return_value.indices.exists.return_value = False
+        aoss.raw_client.return_value.indices.exists.side_effect = [False, True, True, True]
         aoss.bulk_index.side_effect = [Exception("NotFoundError(404, 'index_not_found_exception')"), None]
         embedder = MagicMock()
         embedder.embed_documents.return_value = [[0.1]]
@@ -103,22 +103,87 @@ class TestWriteIndex:
         assert aoss.bulk_index.call_count == 2
         assert aoss.ensure_index.call_count == 2
 
+    def test_resends_only_the_rejected_docs(self):
+        class PartialIndexError(Exception):
+            def __init__(self, errors):
+                super().__init__("partial")
+                self.errors = errors
+
+        aoss = MagicMock()
+        aoss.raw_client.return_value.indices.exists.return_value = True
+        rejected = {"text": "t1", "_op_type": "index", "_index": "ix"}
+        aoss.bulk_index.side_effect = [PartialIndexError([{"index": {"status": 404, "data": rejected}}]), None]
+        embedder = MagicMock()
+        embedder.embed_documents.return_value = [[0.1], [0.2]]
+        write_index(
+            [("t0", {}), ("t1", {})],
+            embedder=embedder,
+            aoss=aoss,
+            index="ix",
+            namespace="ns",
+            embed_model_id="m",
+            recreate=False,
+        )
+        assert len(aoss.bulk_index.call_args_list[0].args[1]) == 2
+        assert aoss.bulk_index.call_args_list[1].args[1] == [{"text": "t1"}]
+
+    def test_gives_up_after_repeated_rejection(self):
+        class PartialIndexError(Exception):
+            errors = [{"index": {"status": 400, "data": {"text": "x"}}}]
+
+        aoss = MagicMock()
+        aoss.raw_client.return_value.indices.exists.return_value = True
+        aoss.bulk_index.side_effect = PartialIndexError("still failing")
+        embedder = MagicMock()
+        embedder.embed_documents.return_value = [[0.1]]
+        with pytest.raises(PartialIndexError):
+            write_index(
+                [("x", {})],
+                embedder=embedder,
+                aoss=aoss,
+                index="ix",
+                namespace="ns",
+                embed_model_id="m",
+                recreate=False,
+            )
+        assert aoss.bulk_index.call_count == 4
+
     def test_waits_for_the_delete_before_recreating(self):
         aoss = MagicMock()
-        aoss.raw_client.return_value.indices.exists.side_effect = [True, True, False]
+        aoss.raw_client.return_value.indices.exists.side_effect = [True, True, False, True]
         embedder = MagicMock()
         embedder.embed_documents.return_value = [[0.1]]
         write_index([("t", {})], embedder=embedder, aoss=aoss, index="ix", namespace="ns", embed_model_id="m")
-        assert aoss.raw_client.return_value.indices.exists.call_count == 3
+        # three polls until the delete lands, one until the new index is ready
+        assert aoss.raw_client.return_value.indices.exists.call_count == 4
 
     def test_recreates_then_writes_in_chunks(self):
         docs = [(f"t{i}", {"entity_type": "company", "entity_uri": str(i)}) for i in range(450)]
         embedder = MagicMock()
         embedder.embed_documents.side_effect = lambda texts: [[0.1] for _ in texts]
         aoss = MagicMock()
-        aoss.raw_client.return_value.indices.exists.return_value = False
+        aoss.raw_client.return_value.indices.exists.side_effect = [False, True, True, True]
 
         assert write_index(docs, embedder=embedder, aoss=aoss, index="ix", namespace="ns", embed_model_id="m") == 450
         aoss.delete_index.assert_called_once_with("ix")
         assert [len(c.args[1]) for c in aoss.bulk_index.call_args_list] == [200, 200, 50]
         assert aoss.bulk_index.call_args_list[0].args[1][0]["embedding_type"] == "entity"
+
+
+@pytest.mark.unit
+class TestIndexNames:
+    def test_versioned_names_round_trip(self):
+        from coa_entity.index_builder import parse_index_name, versioned_index_name
+
+        ns = "824116c4-a93e-4733-9919-17e09bdbc765"
+        assert parse_index_name("coll", versioned_index_name("coll", ns, 1791990000)) == (ns, 1791990000)
+        assert parse_index_name("coll", f"coll-entities-{ns}") == (ns, None)
+        assert parse_index_name("coll", "coll-chunk_x") is None
+
+    def test_name_catalog_lists_every_entity(self):
+        from coa_entity.index_builder import name_catalog
+
+        docs = build_documents(sample_config().entity_types[0], ROWS)
+        cat = name_catalog(docs)
+        assert ["company", "1", "Bajaj Auto Ltd.", {"cd_sector": "Automobile", "cd_subsector": "2W"}] in cat["entities"]
+        assert ["sector", "Automobile", "Automobile", {}] in cat["entities"]

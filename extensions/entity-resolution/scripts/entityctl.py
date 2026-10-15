@@ -7,7 +7,8 @@
     entityctl.py config get  --prefix cuedo [--namespace ID]        print the effective config
     entityctl.py build       --prefix cuedo --namespace ID          rebuild one index (locally)
     entityctl.py invoke      --prefix cuedo --namespace ID          rebuild via the deployed Lambda
-    entityctl.py sweep       --prefix cuedo                         delete orphaned indexes
+    entityctl.py status      --prefix cuedo --namespace ID          show the active index version
+    entityctl.py sweep       --prefix cuedo                         delete orphaned/stale indexes
 
 ``config put`` without ``--namespace`` writes the deployment default
 (``/<prefix>/entities/default``). A namespace override wins over the default.
@@ -70,6 +71,8 @@ def _lambda_env(args: argparse.Namespace, session: boto3.Session) -> None:
             "DATA_SOURCES_TABLE": f"{args.prefix}-{args.env}-sources",
             "ATHENA_WORKGROUP_PREFIX": f"{args.prefix}-{args.env}-",
             "AWS_REGION": session.region_name or "us-east-1",
+            "ENTITY_BUCKET": f"{args.prefix}-{args.env}-ontology-artifacts-"
+            + session.client("sts").get_caller_identity()["Account"],
         }
     )
 
@@ -81,6 +84,17 @@ def _build(args: argparse.Namespace, session: boto3.Session) -> int:
     result = build(args.namespace)
     print(json.dumps(result, indent=2))
     return 0 if result.get("status") == "built" else 1
+
+
+def _status(args: argparse.Namespace, session: boto3.Session) -> int:
+    from coa_entity.active import read_pointer
+
+    pointer = read_pointer(session.client("ssm"), f"/{args.prefix}", args.namespace)
+    if pointer is None:
+        print("no versioned index yet (serve uses the legacy index name, without name matching)")
+        return 1
+    print(json.dumps({"index": pointer.index, "names": pointer.names_uri, "version": pointer.version}, indent=2))
+    return 0
 
 
 def _sweep(args: argparse.Namespace, session: boto3.Session) -> int:
@@ -132,7 +146,10 @@ def main(argv: list[str] | None = None) -> int:
     inv = sub.add_parser("invoke", help="rebuild one namespace's index via the deployed Lambda")
     common(inv, namespace="required")
     inv.set_defaults(fn=_invoke)
-    sw = sub.add_parser("sweep", help="delete indexes of deleted namespaces")
+    st = sub.add_parser("status", help="show a namespace's active index version")
+    common(st, namespace="required")
+    st.set_defaults(fn=_status)
+    sw = sub.add_parser("sweep", help="delete indexes of deleted namespaces and stale versions")
     common(sw, namespace="none")
     sw.set_defaults(fn=_sweep)
 

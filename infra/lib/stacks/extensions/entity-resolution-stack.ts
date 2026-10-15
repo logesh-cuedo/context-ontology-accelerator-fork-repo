@@ -45,6 +45,12 @@ export interface EntityResolutionStackProps extends cdk.StackProps {
   readonly lambdaSecurityGroup: ec2.ISecurityGroup;
   /** Athena query-results bucket the namespace workgroups write to. */
   readonly athenaResultsBucketName?: string;
+  /**
+   * Bucket for each index version's entity name list (`entities/<ns>/v<n>.json`).
+   * The ontology-artifacts bucket: serve can already read it, so serve-stack
+   * needs no change.
+   */
+  readonly entityBucketName: string;
   readonly alarmAction?: IAlarmActionStrategy;
 }
 
@@ -102,6 +108,7 @@ export class EntityResolutionStack extends SCLStack {
         NAMESPACES_TABLE: namespacesTableName,
         ATHENA_WORKGROUP_PREFIX: this.prefixed(""),
         SSM_PREFIX: ssmPrefix,
+        ENTITY_BUCKET: props.entityBucketName,
       },
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
@@ -163,6 +170,29 @@ export class EntityResolutionStack extends SCLStack {
           `arn:aws:glue:${region}:${account}:database/*`,
           `arn:aws:glue:${region}:${account}:table/*/*`,
         ],
+      }),
+    );
+    // Active-version pointer: {ssmPrefix}/entities/_active/<namespace>.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:PutParameter", "ssm:DeleteParameter"],
+        resources: [
+          `arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/entities/_active/*`,
+        ],
+      }),
+    );
+    // Name lists for serve's name matching: <bucket>/entities/*.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+        resources: [`arn:aws:s3:::${props.entityBucketName}/entities/*`],
+      }),
+    );
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket"],
+        resources: [`arn:aws:s3:::${props.entityBucketName}`],
+        conditions: { StringLike: { "s3:prefix": ["entities/*"] } },
       }),
     );
     // lakeformation:GetDataAccess does not support resource-level restrictions.

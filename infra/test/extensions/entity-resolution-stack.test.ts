@@ -24,6 +24,7 @@ function createStack(context: Record<string, unknown> = {}): Template {
     env,
     vpc,
     lambdaSecurityGroup: new ec2.SecurityGroup(dep, "LambdaSG", { vpc }),
+    entityBucketName: "coa-dev-ontology-artifacts-123456789012",
   });
   return Template.fromStack(stack);
 }
@@ -65,6 +66,23 @@ describe("EntityResolutionStack", () => {
     );
     expect(statements).toContain("/entities/*");
     expect(statements).toContain("/config");
+  });
+
+  it("can publish the active pointer and the name lists, nothing wider", () => {
+    const statements = JSON.stringify(
+      template.findResources("AWS::IAM::Policy"),
+    );
+    expect(statements).toContain("/entities/_active/*");
+    expect(statements).toContain(
+      "coa-dev-ontology-artifacts-123456789012/entities/*",
+    );
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          ENTITY_BUCKET: "coa-dev-ontology-artifacts-123456789012",
+        }),
+      },
+    });
   });
 
   it("limits AOSS writes to entity indexes, with new policy names", () => {

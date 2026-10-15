@@ -23,13 +23,23 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import boto3
 import structlog
 
+from .active import ActivePointer, delete_pointer, read_pointer, write_pointer
 from .config import EntityConfigError, EntityTypeSpec, load_config
-from .index_builder import build_all_documents, index_name, read_rows, write_index
+from .index_builder import (
+    build_all_documents,
+    index_name,
+    name_catalog,
+    parse_index_name,
+    read_rows,
+    versioned_index_name,
+    write_index,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -164,22 +174,68 @@ def build(namespace: str) -> dict[str, Any]:
         model_id=model_id or None, region=region, max_workers=int(_env("EMBED_MAX_WORKERS", "16"))
     )
     aoss = AossVectorClient(endpoint=_env("OSS_ENDPOINT"), region=region, dimensions=embedder.dimensions)
-    index = index_name(_env("OSS_COLLECTION_NAME"), namespace)
-    written = write_index(docs, embedder=embedder, aoss=aoss, index=index, namespace=namespace, embed_model_id=model_id)
+    collection = _env("OSS_COLLECTION_NAME")
+    version = int(time.time())
+    index = versioned_index_name(collection, namespace, version)
+    # Write a NEW version, then its name list, then switch the pointer — serve
+    # keeps searching the previous version until the new one is complete.
+    written = write_index(
+        docs, embedder=embedder, aoss=aoss, index=index, namespace=namespace, embed_model_id=model_id, recreate=False
+    )
+    s3 = boto3.client("s3", region_name=region)
+    bucket = _env("ENTITY_BUCKET")
+    key = f"entities/{namespace}/v{version}.json"
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(name_catalog(docs)).encode(), ContentType="application/json")
+    previous = read_pointer(ssm, _env("SSM_PREFIX"), namespace)
+    write_pointer(
+        ssm,
+        _env("SSM_PREFIX"),
+        namespace,
+        ActivePointer(index=index, names_uri=f"s3://{bucket}/{key}", version=version),
+    )
+    _retire(aoss, s3, bucket, collection, namespace, previous)
     logger.info(
         "entity_index_built", namespace=namespace, index=index, documents=written, by_type=counts, missing=missing
     )
     return {"status": "built", "index": index, "documents": written, "by_type": counts, "missing_types": missing}
 
 
+def _retire(aoss: Any, s3: Any, bucket: str, collection: str, namespace: str, previous: ActivePointer | None) -> None:
+    """Drop the version the pointer just moved off, and the pre-versioning index. Best-effort."""
+    stale = [index_name(collection, namespace)]
+    if previous is not None:
+        stale.append(previous.index)
+    for idx in stale:
+        try:
+            aoss.delete_index(idx)
+        except Exception as exc:
+            logger.warning("entity_index_retire_failed", index=idx, error=str(exc)[:200])
+    if previous is not None and previous.names_uri.startswith(f"s3://{bucket}/"):
+        try:
+            s3.delete_object(Bucket=bucket, Key=previous.names_uri.removeprefix(f"s3://{bucket}/"))
+        except Exception as exc:
+            logger.warning("entity_names_retire_failed", uri=previous.names_uri, error=str(exc)[:200])
+
+
+_STALE_AFTER_S = 2 * 3600  # an unpointed version younger than this may be a build in progress
+
+
 def sweep() -> dict[str, Any]:
-    """Delete entity indexes whose namespace no longer exists."""
+    """Delete entity indexes (and pointers / name lists) no namespace still uses.
+
+    Removes every index of a deleted namespace, and any version of a live
+    namespace that is not the active one and older than two hours (a failed or
+    superseded build).
+    """
     from coa_common.opensearch.client import AossVectorClient
 
     region = _region()
     collection = _env("OSS_COLLECTION_NAME")
     prefix = index_name(collection, "")
     aoss = AossVectorClient(endpoint=_env("OSS_ENDPOINT"), region=region)
+    ssm = boto3.client("ssm", region_name=region)
+    s3 = boto3.client("s3", region_name=region)
+    bucket = _env("ENTITY_BUCKET")
     try:
         rows = aoss.raw_client().cat.indices(index=f"{prefix}*", format="json")
     except Exception as exc:
@@ -188,15 +244,36 @@ def sweep() -> dict[str, Any]:
         else:
             raise
     namespaces = boto3.resource("dynamodb", region_name=region).Table(_env("NAMESPACES_TABLE"))
+    exists: dict[str, bool] = {}
+    active: dict[str, ActivePointer | None] = {}
     deleted: list[str] = []
+    now = int(time.time())
     for row in rows or []:
         index = str(row.get("index") or "")
-        namespace = index[len(prefix) :]
-        if not index.startswith(prefix) or not namespace:
+        parsed = parse_index_name(collection, index)
+        if parsed is None:
             continue
-        exists = namespaces.get_item(Key={"PK": f"NS#{namespace}", "SK": "METADATA"}).get("Item")
-        if not exists and aoss.delete_index(index):
+        namespace, version = parsed
+        if namespace not in exists:
+            exists[namespace] = bool(namespaces.get_item(Key={"PK": f"NS#{namespace}", "SK": "METADATA"}).get("Item"))
+            active[namespace] = read_pointer(ssm, _env("SSM_PREFIX"), namespace) if exists[namespace] else None
+        pointer = active[namespace]
+        if not exists[namespace]:
+            stale = True
+        elif pointer is not None and index == pointer.index:
+            stale = False
+        elif version is None:
+            stale = pointer is not None  # legacy index superseded by a versioned build
+        else:
+            stale = now - version > _STALE_AFTER_S and (pointer is None or version < pointer.version)
+        if stale and aoss.delete_index(index):
             deleted.append(index)
+    for namespace, alive in exists.items():
+        if not alive:
+            delete_pointer(ssm, _env("SSM_PREFIX"), namespace)
+            if bucket:
+                for obj in s3.list_objects_v2(Bucket=bucket, Prefix=f"entities/{namespace}/").get("Contents", []):
+                    s3.delete_object(Bucket=bucket, Key=obj["Key"])
     logger.info("entity_index_sweep", checked=len(rows or []), deleted=deleted)
     return {"status": "swept", "deleted": deleted}
 

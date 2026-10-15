@@ -424,6 +424,7 @@ async function deploy(): Promise<void> {
       vpc: network.vpc,
       lambdaSecurityGroup: network.lambdaSecurityGroup,
       athenaResultsBucketName: storage.athenaResultsBucket.bucketName,
+      entityBucketName: storage.ontologyArtifactsBucket.bucketName,
       alarmAction,
     },
   );

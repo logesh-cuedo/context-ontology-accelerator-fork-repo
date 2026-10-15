@@ -108,6 +108,24 @@ class EntityTypeSpec:
 
 
 @dataclass(frozen=True)
+class KindInfo:
+    """One searchable kind, the same shape for entities and groups.
+
+    Companies (an entity type) and sectors (a group) go through one code path:
+    search, clarification, SQL filter and fallback rule all read this view.
+    """
+
+    type: str
+    is_group: bool
+    table: str  # the entity table the kind is read from (e.g. sectors)
+    table_column: str  # its name column in that table (company_name / cd_sector)
+    sql_column: str  # the column fact tables filter on (company_name / sector)
+    id_column: str  # entity id column; "" for a group (the value is the id)
+    top_k: int
+    parent: str = ""  # group: the entity type whose table holds it
+
+
+@dataclass(frozen=True)
 class EntityConfig:
     """All entity types configured for a namespace."""
 
@@ -120,6 +138,40 @@ class EntityConfig:
             out.append((spec.type, spec.top_k))
             out += [(g.type, g.top_k) for g in spec.groups]
         return out
+
+    def kind_infos(self) -> list[KindInfo]:
+        """Every searchable kind as a KindInfo — entity types then their groups."""
+        out: list[KindInfo] = []
+        for spec in self.entity_types:
+            out.append(
+                KindInfo(
+                    type=spec.type,
+                    is_group=False,
+                    table=spec.table,
+                    table_column=spec.name_column,
+                    sql_column=spec.sql_column,
+                    id_column=spec.id_column,
+                    top_k=spec.top_k,
+                )
+            )
+            out += [
+                KindInfo(
+                    type=g.type,
+                    is_group=True,
+                    table=spec.table,
+                    table_column=g.column,
+                    sql_column=g.sql_column,
+                    id_column="",
+                    top_k=g.top_k,
+                    parent=spec.type,
+                )
+                for g in spec.groups
+            ]
+        return out
+
+    def kind(self, kind: str) -> KindInfo | None:
+        """The KindInfo named ``kind``, or None."""
+        return next((k for k in self.kind_infos() if k.type == kind), None)
 
     def member_spec(self, kind: str) -> EntityTypeSpec | None:
         """The entity type named ``kind``, or None if ``kind`` is a group or unknown."""
