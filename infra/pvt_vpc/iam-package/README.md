@@ -11,7 +11,7 @@ names, before the deployment runs.
 |---|---|
 | `roles/` | one file per role: trust policy, managed policy ARNs, inline policy |
 | `policies/` | the same inline policy on its own, for tooling that wants it separately |
-| `managed-policies/` | one customer-managed policy, attached to `coa-dev-smus-exec` |
+| `managed-policies/` | two customer-managed policies — see below |
 
 ## The names are the contract
 
@@ -57,6 +57,24 @@ Apply each as: create the role with `trustPolicy` as its trust relationship,
 attach each `managedPolicyArns` entry, and put `inlinePolicy` on it as an
 inline policy. `stack`, `logicalId` and `nameIsExplicit` are provenance only —
 they record where in the deployment the role came from and are not applied.
+
+## The two managed policies
+
+| Policy | Attach to |
+|---|---|
+| `coa-dev-smus-exec-policy` | the `coa-dev-smus-exec` role |
+| `coa-dev-cfn-exec-policy` | **no role here** — pass it as `CloudFormationExecutionPolicies` when applying `coa-cdk-bootstrap.yaml` |
+
+`coa-dev-cfn-exec-policy` is the one to get right. That bootstrap parameter
+defaults to **`AdministratorAccess`**, which would let CloudFormation create
+IAM roles on the deployment's behalf and make this whole arrangement
+pointless. The policy allows the 23 services the stacks create resources in,
+plus `iam:PassRole` to attach the roles above, and denies role and
+security-group creation.
+
+The `Deny` block is not redundant with simply omitting those actions: that
+bootstrap parameter takes a **list**, so a broader policy can be attached to
+the same role later, and an explicit `Deny` survives it.
 
 ## Three roles have an empty inline policy
 
