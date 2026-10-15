@@ -134,27 +134,6 @@ export interface PvtVpcEndpoints {
 }
 
 /**
- * The staging bucket and container repository CDK publishes assets to.
- *
- * `cdk bootstrap` normally creates these together with five IAM roles the
- * deployment assumes. An account that denies `iam:CreateRole` cannot run it —
- * so these two are created by hand instead (neither needs any IAM permission)
- * and named here, which switches the app to
- * `CliCredentialsStackSynthesizer`: assets upload with the caller's own
- * credentials and no role is assumed.
- *
- * Both fields together, or neither. One alone is rejected at synth, because a
- * deployment with nowhere to put its container images fails only when it
- * reaches the first image push.
- */
-export interface PvtVpcStaging {
-  /** S3 bucket for Lambda zips and file assets. Must already exist. */
-  readonly bucketName?: string;
-  /** ECR repository for container images. Must already exist. */
-  readonly repositoryName?: string;
-}
-
-/**
  * An existing Neptune cluster to use instead of creating one.
  *
  * Leave every field blank and the deployment creates its own cluster, subnet
@@ -256,19 +235,6 @@ export interface PvtVpcConfigFile {
 
   /** The one endpoint id the synth cannot derive. */
   readonly vpcEndpoints?: PvtVpcEndpoints;
-
-  /**
-   * Where CDK stages Lambda zips and container images.
-   *
-   * Filled in means `CliCredentialsStackSynthesizer`: CDK uploads assets with
-   * the caller's own credentials and the deployment assumes NO role, so the
-   * five `cdk bootstrap` IAM roles are never needed. An account that denies
-   * `iam:CreateRole` cannot run `cdk bootstrap`, and the bucket and repository
-   * are plain resources an operator can create without any IAM permission.
-   *
-   * Omit the block to keep the default synthesizer and standard bootstrap.
-   */
-  readonly staging?: PvtVpcStaging;
 
   /**
    * Resources the client already runs, to reuse instead of create.
@@ -388,60 +354,6 @@ export function resolveExistingNeptune(
   }
 
   return { clusterEndpoint: endpoint, port, clusterResourceId: resourceId };
-}
-
-/**
- * The pre-created staging bucket and repository, or `undefined` to use
- * standard `cdk bootstrap`.
- *
- * Read from the file directly, like {@link resolveExistingNeptune} and for the
- * same reason: `bin/app.ts` needs this BEFORE any stack exists, so there is no
- * scope to read context from. It therefore applies in both flows — an operator
- * who cannot run `cdk bootstrap` has the same problem whether or not the VPC
- * was pre-created.
- *
- * @param configPath overrides the file location; tests use it directly
- */
-export function resolveStaging(
-  configPath?: string,
-): Required<PvtVpcStaging> | undefined {
-  const staging = readConfigFileIfPresent(configPath)?.staging;
-  if (!staging) {
-    return undefined;
-  }
-
-  const bucketName = (staging.bucketName ?? "").trim();
-  const repositoryName = (staging.repositoryName ?? "").trim();
-
-  // Both blank is the shipped state and means "use cdk bootstrap".
-  if (bucketName === "" && repositoryName === "") {
-    return undefined;
-  }
-
-  const problems: string[] = [];
-  if (bucketName === "") {
-    problems.push("staging.bucketName is required");
-  }
-  if (repositoryName === "") {
-    // Half-configured is worse than unconfigured: file assets would publish to
-    // the named bucket while images still expected the bootstrap repository,
-    // failing at the first container push rather than at synth.
-    problems.push("staging.repositoryName is required");
-  }
-
-  if (problems.length > 0) {
-    throw new Error(
-      [
-        "staging in the private-VPC config is incomplete:",
-        ...problems.map((p) => `  - ${p}`),
-        "",
-        "Both fields are required together. Clear both to use the standard",
-        "`cdk bootstrap` bucket and repository instead.",
-      ].join("\n"),
-    );
-  }
-
-  return { bucketName, repositoryName };
 }
 
 /**

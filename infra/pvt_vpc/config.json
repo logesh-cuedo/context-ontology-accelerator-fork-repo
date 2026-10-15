@@ -35,11 +35,6 @@
   "vpcEndpoints": {
     "aossData": ""
   },
-  "_5": "Optional. Where CDK stages Lambda zips and container images. `cdk bootstrap` creates these two AND five IAM roles the deploy assumes - an account that denies iam:CreateRole cannot run it. Create the bucket and the ECR repository by hand (neither needs any IAM permission), name them here, and the deploy assumes NO role and needs no bootstrap. Leave both blank to use standard `cdk bootstrap`. Both together or neither.",
-  "staging": {
-    "bucketName": "",
-    "repositoryName": ""
-  },
   "_4": "Optional, and read in BOTH flows. Resources you already run, to reuse instead of create. Leave a block entirely blank and the deployment creates its own, as it always has. Fill a block in and it creates none of those resources and uses yours.",
   "existing": {
     "_neptune": "Your own Neptune cluster. All three fields together, or all blank. clusterResourceId is 'cluster-ABCD1234...', NOT the cluster name - every IAM policy is built from it, and the name produces an ARN that matches nothing and denies at runtime. Get it with: aws neptune describe-db-clusters --db-cluster-identifier <name> --query 'DBClusters[0].DbClusterResourceId'",

@@ -74,11 +74,12 @@ to set as the API Gateway account-level CloudWatch role (see below).
 
 ## What is NOT here
 
-- **CDK staging** — the deployment needs an S3 bucket and an ECR repository to
-  publish Lambda zips and container images to. Both are plain resources needing
-  no IAM permission; their names go in `pvt_vpc/config.json` under `staging`.
-  Do **not** run `cdk bootstrap` — it would create five more IAM roles, which
-  this account denies, and is unnecessary once `staging` is set.
+- **The five CDK bootstrap roles** — `cdk-hnb659fds-*-role-<account>-<region>`,
+  plus an asset bucket and a container repository. They come from CDK's own
+  bootstrap template, shipped as
+  `pvt_vpc/networking/coa-cdk-bootstrap.yaml`, and are created by applying
+  that template rather than from this package. Required in every region the
+  deployment touches.
 - **Security groups and VPC endpoints** — see `pvt_vpc/networking/`.
 
 ## One step after the deployment

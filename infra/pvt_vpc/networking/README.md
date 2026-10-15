@@ -9,14 +9,26 @@ deployment imports these; it creates no networking itself.
 
 | Template | Creates | Apply |
 |---|---|---|
-| `coa-cdk-staging.yaml` | the CDK staging bucket and container repository (3 resources) | any time |
+| `coa-cdk-bootstrap.yaml` | CDK's own bootstrap — 5 IAM roles, asset bucket, container repository (14 resources) | any time, **in every region** |
 | `coa-networking-security-groups.yaml` | **all** security groups — 8 application + 1 shared for the endpoints — and the 12 rules (21 resources) | **first of the two** |
 | `coa-networking-vpc-endpoints.yaml` | 22 endpoints, no security groups (22 resources) | second |
 
-`coa-cdk-staging.yaml` replaces `cdk bootstrap`, which cannot run in an account
-that denies `iam:CreateRole` — it would create five IAM roles. The two
-resources it makes need no IAM permission at all. **Do not also run
-`cdk bootstrap`.**
+`coa-cdk-bootstrap.yaml` is CDK's own template, unmodified — `cdk bootstrap` is
+only a CLI wrapper that deploys it. The deploying principal cannot run that
+command in an account denying `iam:CreateRole`, but **you** can apply the
+template, and all five role names are fully determined
+(`cdk-hnb659fds-<x>-role-<account>-<region>`), which is what makes
+pre-creating them possible.
+
+Two things about it:
+
+- **`CloudFormationExecutionPolicies`** — left empty, this attaches
+  `AdministratorAccess` to the role CloudFormation assumes, which hands the
+  deployment full admin and makes the `iam:CreateRole` denial meaningless.
+  Pass a scoped policy ARN.
+- **Apply it in every region the deployment touches.** The `*-edge-waf` stack
+  always goes to `us-east-1` (a CLOUDFRONT-scope WAF WebACL can only exist
+  there), so a deployment targeting another region needs both.
 
 The split is by resource type: **every security group is in the first file, every
 endpoint in the second.**
@@ -39,10 +51,12 @@ pasting the `InterfaceEndpointSecurityGroupId` from the first stack's Outputs.
 **CLI:**
 
 ```bash
-# CDK staging - any time, nothing references it
+# CDK bootstrap - any time, and once per region the deployment touches
 aws cloudformation deploy \
-  --stack-name coa-cdk-staging \
-  --template-file coa-cdk-staging.yaml
+  --stack-name CDKToolkit \
+  --template-file coa-cdk-bootstrap.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides CloudFormationExecutionPolicies=<scoped-policy-arn>
 
 # 1 of 2 - all security groups
 aws cloudformation deploy \
@@ -191,12 +205,9 @@ From **`coa-networking-security-groups`**:
 That stack has a **ninth** output, `InterfaceEndpointSecurityGroupId`, which
 does **not** go into the config — it is a parameter of the endpoints template.
 
-From **`coa-cdk-staging`**:
-
-| Output | Goes into config.json |
-|---|---|
-| `StagingBucketName` | `staging.bucketName` |
-| `ContainerRepositoryName` | `staging.repositoryName` |
+The bootstrap stack needs **nothing** copied into the config: the deployment
+derives its bucket, repository and role names from the account, region and
+qualifier.
 
 From **`coa-networking-vpc-endpoints`** — one value, out of 22 endpoints:
 

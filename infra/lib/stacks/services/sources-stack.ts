@@ -37,7 +37,6 @@ import {
 } from "../../context";
 import { Paths, fromRoot } from "../../paths";
 import { PvtVpcRoles } from "../../pvt-vpc-roles";
-import { resolveStaging } from "../../pvt-vpc-config";
 import { bundlePython } from "../../utils/python-bundling";
 import { grantEventsDeliveryToLogGroup } from "../../utils/events-log-group-policy";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
@@ -3379,9 +3378,7 @@ export class SourcesStack extends SCLStack {
       (this.node.tryGetContext("cdk_cfn_exec_role_name") as
         | string
         | undefined) ??
-      (resolveStaging()
-        ? undefined
-        : `cdk-${cdk.DefaultStackSynthesizer.DEFAULT_QUALIFIER}-cfn-exec-role-${this.account}-${this.region}`);
+      `cdk-${cdk.DefaultStackSynthesizer.DEFAULT_QUALIFIER}-cfn-exec-role-${this.account}-${this.region}`;
     const issuerField =
       "$.detail.userIdentity.sessionContext.sessionIssuer.userName";
     const unexpectedWriteMetric = new logs.MetricFilter(

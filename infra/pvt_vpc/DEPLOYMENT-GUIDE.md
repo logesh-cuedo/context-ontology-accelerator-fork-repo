@@ -125,45 +125,62 @@ differ, but it cannot check the order.
 
 ---
 
-## Step 2 — CDK staging
+## Step 2 — CDK bootstrap
 
-**Template:** `pvt_vpc/networking/coa-cdk-staging.yaml` (3 resources)
-**Why:** the deployment uploads Lambda zips and container images here, and
-CloudFormation reads them from here.
+**Template:** `pvt_vpc/networking/coa-cdk-bootstrap.yaml` (14 resources)
+**Why:** CDK publishes Lambda zips and container images to a bucket and a
+repository before CloudFormation reads them, and assumes five roles to do it.
+This has always been required — also for the standard flow.
 
 **Console:** CloudFormation → *Create stack* → **Upload a template file** →
-`coa-cdk-staging.yaml` → stack name `coa-cdk-staging` → *Submit*.
+`coa-cdk-bootstrap.yaml` → stack name **`CDKToolkit`** → *Submit*.
 
-### Why not `cdk bootstrap`
+The stack name must be exactly `CDKToolkit`: that is what the CDK CLI and
+`scripts/preflight-deploy.sh` look for.
 
-`cdk bootstrap` is the normal way to create these. It also creates **five IAM
-roles** that the deployment then assumes:
+### Why the account owner applies it, not the deploying principal
+
+`cdk bootstrap` is only a CLI wrapper that deploys this exact template. It
+creates five IAM roles, so the deploying principal cannot run it in an account
+denying `iam:CreateRole` — but **you** can apply the template, with the same
+rights you used for steps 1 and 5.
+
+All five names are fully determined, which is what makes this work:
 
 ```
-cdk-hnb659fds-deploy-role-…            cdk-hnb659fds-file-publishing-role-…
-cdk-hnb659fds-cfn-exec-role-…          cdk-hnb659fds-image-publishing-role-…
-cdk-hnb659fds-lookup-role-…
+cdk-hnb659fds-deploy-role-<account>-<region>
+cdk-hnb659fds-cfn-exec-role-<account>-<region>
+cdk-hnb659fds-lookup-role-<account>-<region>
+cdk-hnb659fds-file-publishing-role-<account>-<region>
+cdk-hnb659fds-image-publishing-role-<account>-<region>
 ```
 
-An account that denies `iam:CreateRole` cannot run it — so the deployment
-could never start, regardless of what the application itself creates. And
-because CDK names those roles at deploy time, there is no name to pre-create
-and import.
+`hnb659fds` is CDK's default qualifier. Nothing is random, nothing needs
+copying into the config — the deployment derives all of it from the account,
+region and qualifier.
 
-This template creates only the bucket and the repository, which need **no IAM
-permission at all**. Naming them in `config.json` switches the app to
-`CliCredentialsStackSynthesizer`, which publishes assets with the caller's own
-credentials and assumes no role.
+The file is CDK's own template, unmodified, from `cdk bootstrap --show-template`.
+Regenerate it from the CDK version the deployment uses rather than editing it.
 
-**Do not also run `cdk bootstrap`.** It is unnecessary once `staging` is set
-and would create the five roles this avoids.
+### ⚠️ Scope `CloudFormationExecutionPolicies`
 
-### Outputs to keep
+Left empty, this parameter attaches **`AdministratorAccess`** to the role
+CloudFormation assumes to do the work. The deployment would then run as full
+admin and the `iam:CreateRole` denial would mean nothing — it would simply
+succeed at creating roles.
 
-| Output | Goes to |
-|---|---|
-| `StagingBucketName` | `staging.bucketName` |
-| `ContainerRepositoryName` | `staging.repositoryName` |
+Pass a scoped policy ARN instead. It needs create/update/delete on the
+services listed under step 7, plus `iam:PassRole` and `logs:PutResourcePolicy`,
+and must **not** grant `iam:CreateRole`, `ec2:CreateSecurityGroup` or
+`ec2:CreateVpcEndpoint`.
+
+### ⚠️ Apply it in every region the deployment touches
+
+The `*-edge-waf` stack always deploys to **`us-east-1`**, because a
+CLOUDFRONT-scope WAF WebACL can only exist there. A deployment targeting any
+other region needs this template applied in **both** — its own region and
+`us-east-1` — or it fails partway through on that one stack, after most of the
+deployment has succeeded. Preflight checks both.
 
 ---
 
@@ -325,12 +342,8 @@ created in steps 1–5 and what the deployment imports.
     "connector": "", "discoveryOcsp": "", "agentCore": "", "mcp": ""
   },
 
-  "vpcEndpoints": { "aossData": "" }, // from step 4
+  "vpcEndpoints": { "aossData": "" }  // from step 4
 
-  "staging": {                        // from step 2
-    "bucketName": "",
-    "repositoryName": ""
-  }
 }
 ```
 
@@ -476,8 +489,9 @@ CloudFormation cannot delete a non-empty bucket, so the stack delete fails
 part-way if you skip this.
 
 Then remove, in any order: the IAM package, the three CloudFormation stacks,
-and the VPC. The staging bucket and repository are `Retain`, so deleting their
-stack leaves them behind — delete them by hand if you want them gone.
+and the VPC. The bootstrap stack (`CDKToolkit`) retains its asset bucket and
+container repository, so deleting it leaves those behind — empty and delete
+them by hand if you want them gone.
 
 ---
 
@@ -490,7 +504,7 @@ stack leaves them behind — delete them by hand if you want them gone.
 | **Deploy succeeds, a feature fails with access-denied** | a role name in step 5 does not match, or a statement is missing from its policy |
 | `AccessDenied` on `logs:PutResourcePolicy` | the deploying principal needs this; see step 7 |
 | Synth fails listing config fields | step 6 is incomplete — the message names each one |
-| Fails before any stack starts | `staging` missing or misnamed; or `cdk bootstrap` was run and conflicts |
+| Fails before any stack starts | the `CDKToolkit` stack is missing in this region — step 2 |
 | AgentCore or OpenSearch fails late | the subnets are in the wrong AZs — step 1 |
 
 The third row is the one to watch. It does **not** fail the deployment, because

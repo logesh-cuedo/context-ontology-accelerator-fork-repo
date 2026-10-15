@@ -54,9 +54,11 @@ In this order:
 
 1. **VPC, NAT, subnets, route tables.** Subnets in **us-east-1b and
    us-east-1c** — the one choice that cannot be changed later.
-2. **`pvt_vpc/networking/coa-cdk-staging.yaml`** — the staging bucket and
-   container repository. Do **not** run `cdk bootstrap`; this replaces it, and
-   bootstrap would create five IAM roles the client's account denies.
+2. **`pvt_vpc/networking/coa-cdk-bootstrap.yaml`** as stack `CDKToolkit` —
+   CDK's own bootstrap: five roles, an asset bucket and a container
+   repository. Pass a scoped `CloudFormationExecutionPolicies`, or the role
+   CloudFormation assumes gets AdministratorAccess and the rehearsal proves
+   nothing. Apply it in `us-east-1` too if you deploy elsewhere.
 3. **`pvt_vpc/networking/coa-networking-security-groups.yaml`**, then
    **`coa-networking-vpc-endpoints.yaml`** (the second takes
    `InterfaceEndpointSecurityGroupId` from the first).
@@ -67,7 +69,7 @@ In this order:
 
 `pvt_vpc/config.json`: `account`, the 8 security group ids and
 `vpcEndpoints.aossData` from the stack outputs, the 4 `vpc.*` values from
-step 2.1, and `staging.bucketName` / `staging.repositoryName` from step 2.2.
+step 2.1. The bootstrap stack contributes nothing to the config.
 
 ## 4. Deploy as the restricted role
 
@@ -116,7 +118,7 @@ passes, and the test has proven nothing.
 | `AccessDenied` on `ec2:CreateSecurityGroup` | same, for security groups |
 | `Role ... does not exist` / access-denied at runtime | a role name in the IAM package does not match what the code imports |
 | `AccessDenied` on `logs:PutResourcePolicy` | the client's policy is stricter than this deny list; tell the developers |
-| Fails before any stack | staging bucket/repository missing or misnamed in config |
+| Fails before any stack | the `CDKToolkit` stack is missing in this region |
 
 The third row is the dangerous one: it does **not** fail the deployment. It
 fails later, at runtime, in whichever component holds the mis-named role.
@@ -132,8 +134,9 @@ npx cdk destroy --all -c vpc_id=vpc-xxxxxxxx
 auto-delete helper, because that helper needs its own IAM role. Stack deletion
 fails on a non-empty bucket.
 
-Then, as admin, delete the IAM package, the networking stacks, the staging
-bucket and repository, and the VPC.
+Then, as admin, delete the IAM package, the networking stacks, the
+`CDKToolkit` stack (its bucket and repository are retained — empty and delete
+them by hand), and the VPC.
 
 ## What this does not cover
 
