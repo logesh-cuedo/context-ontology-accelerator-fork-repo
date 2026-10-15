@@ -38,6 +38,7 @@ import {
 import { Paths, fromRoot } from "../../paths";
 import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
+import { grantEventsDeliveryToLogGroup } from "../../utils/events-log-group-policy";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
 import { NetworkStack } from "../foundation/network-stack";
 import { StorageStack } from "../foundation/storage-stack";
@@ -3293,44 +3294,70 @@ export class SourcesStack extends SCLStack {
       "UnexpectedConnectorParameterWrite. Requires a CloudTrail trail logging " +
       "management events in this account and region; this stack creates none.";
 
-    new events.Rule(this, "DatabricksParameterWriteRule", {
-      ruleName: this.prefixed("databricks-parameter-writes"),
-      description: parameterWriteRuleDescription,
-      eventPattern: {
-        source: ["aws.ssm"],
-        detailType: ["AWS API Call via CloudTrail"],
-        detail: {
-          eventSource: ["ssm.amazonaws.com"],
-          eventName: ["PutParameter", "DeleteParameter"],
-          requestParameters: {
-            name: events.Match.prefix(parameterWritePathPrefix),
+    const parameterWriteRule = new events.Rule(
+      this,
+      "DatabricksParameterWriteRule",
+      {
+        ruleName: this.prefixed("databricks-parameter-writes"),
+        description: parameterWriteRuleDescription,
+        eventPattern: {
+          source: ["aws.ssm"],
+          detailType: ["AWS API Call via CloudTrail"],
+          detail: {
+            eventSource: ["ssm.amazonaws.com"],
+            eventName: ["PutParameter", "DeleteParameter"],
+            requestParameters: {
+              name: events.Match.prefix(parameterWritePathPrefix),
+            },
           },
         },
       },
-      targets: [parameterAuditTarget],
-    });
+    );
+
+    // Before addTarget, and the target attached separately rather than via
+    // `targets:`: writes the log-group resource policy as plain CloudFormation
+    // instead of the Lambda-backed custom resource whose CDK-named IAM role a
+    // locked-down account cannot create. See lib/utils/events-log-group-policy.ts.
+    grantEventsDeliveryToLogGroup(
+      parameterWriteRule,
+      parameterAuditLogGroup,
+      this.prefixed("databricks-parameter-write-events"),
+    );
+    parameterWriteRule.addTarget(parameterAuditTarget);
 
     // The batch form, which would otherwise escape the rule entirely: a different
     // event name and `names` as a list. EventBridge content filters match if ANY
     // element of a list matches, so one prefix matcher covers a batch that mixes
     // paths — the interesting case, since a batch delete touching one parameter
     // under this path is exactly what a repoint's cleanup would look like.
-    new events.Rule(this, "DatabricksParameterBatchDeleteRule", {
-      ruleName: this.prefixed("databricks-parameter-batch-deletes"),
-      description: parameterWriteRuleDescription,
-      eventPattern: {
-        source: ["aws.ssm"],
-        detailType: ["AWS API Call via CloudTrail"],
-        detail: {
-          eventSource: ["ssm.amazonaws.com"],
-          eventName: ["DeleteParameters"],
-          requestParameters: {
-            names: events.Match.prefix(parameterWritePathPrefix),
+    const parameterBatchDeleteRule = new events.Rule(
+      this,
+      "DatabricksParameterBatchDeleteRule",
+      {
+        ruleName: this.prefixed("databricks-parameter-batch-deletes"),
+        description: parameterWriteRuleDescription,
+        eventPattern: {
+          source: ["aws.ssm"],
+          detailType: ["AWS API Call via CloudTrail"],
+          detail: {
+            eventSource: ["ssm.amazonaws.com"],
+            eventName: ["DeleteParameters"],
+            requestParameters: {
+              names: events.Match.prefix(parameterWritePathPrefix),
+            },
           },
         },
       },
-      targets: [parameterAuditTarget],
-    });
+    );
+
+    // A second policy on the same log group: the child id is derived from the
+    // RULE, so the two rules do not collide.
+    grantEventsDeliveryToLogGroup(
+      parameterBatchDeleteRule,
+      parameterAuditLogGroup,
+      this.prefixed("databricks-parameter-batch-delete-events"),
+    );
+    parameterBatchDeleteRule.addTarget(parameterAuditTarget);
 
     // An allowlist rather than a single expected principal: the sources-API role, which
     // writes here in normal operation, plus the CDK CloudFormation execution role so a

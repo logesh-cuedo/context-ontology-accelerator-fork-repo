@@ -24,6 +24,7 @@ import { Paths } from "../../paths";
 import { resolveContext } from "../../context";
 import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
+import { grantEventsDeliveryToLogGroup } from "../../utils/events-log-group-policy";
 import { NetworkStack } from "../foundation/network-stack";
 import {
   DEFAULT_BEDROCK_MODEL_ID,
@@ -599,7 +600,7 @@ export class OntologyStack extends SCLStack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    new events.Rule(this, "OntologyTaskOomRule", {
+    const oomRule = new events.Rule(this, "OntologyTaskOomRule", {
       ruleName: this.prefixed("ontology-oom"),
       description:
         "Ontology induction ECS task stopped by OOM (exit 137 / OutOfMemory stoppedReason)",
@@ -616,8 +617,19 @@ export class OntologyStack extends SCLStack {
           ],
         },
       },
-      targets: [new targets.CloudWatchLogGroup(oomLogGroup)],
     });
+
+    // Before addTarget, and the target is attached separately rather than via
+    // `targets:` above: this writes the log-group resource policy as plain
+    // CloudFormation, where `targets.CloudWatchLogGroup` would otherwise build
+    // a Lambda-backed custom resource with a CDK-named IAM role that a
+    // locked-down account cannot create. See lib/utils/events-log-group-policy.ts.
+    grantEventsDeliveryToLogGroup(
+      oomRule,
+      oomLogGroup,
+      this.prefixed("ontology-oom-events"),
+    );
+    oomRule.addTarget(new targets.CloudWatchLogGroup(oomLogGroup));
 
     // Metric filter — every event delivered to the log group is an OOM stop
     // (the rule already filtered), so match all events and emit a count of 1.
