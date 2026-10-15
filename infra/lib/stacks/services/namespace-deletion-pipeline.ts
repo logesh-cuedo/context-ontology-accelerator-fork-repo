@@ -140,11 +140,6 @@ export class NamespaceDeletionPipeline extends Construct {
         ...(props.opensearchEndpoint && {
           OSS_ENDPOINT: props.opensearchEndpoint,
         }),
-        // Names the namespace's entity index ({collection}-entities-{ns}), which
-        // namespace teardown drops alongside the GraphRAG indexes.
-        ...(props.opensearchCollectionName && {
-          OSS_COLLECTION_NAME: props.opensearchCollectionName,
-        }),
       },
     });
     deleteSourcesFn.addToRolePolicy(
@@ -189,8 +184,6 @@ export class NamespaceDeletionPipeline extends Construct {
                     `index/${props.opensearchCollectionName}/chunk_*`,
                     `index/${props.opensearchCollectionName}/topic_*`,
                     `index/${props.opensearchCollectionName}/statement_*`,
-                    // Tier-2 entity index (scripts/index_entities.py).
-                    `index/${props.opensearchCollectionName}/${props.opensearchCollectionName}-entities-*`,
                   ],
                   Permission: ["aoss:DescribeIndex", "aoss:DeleteIndex"],
                 },

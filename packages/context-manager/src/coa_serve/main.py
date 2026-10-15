@@ -54,7 +54,13 @@ from .session_metadata import SessionMetadataStore
 from .sse_emitter import SSEEmitter
 from .step_ids import StepId
 from .tier1.metric_resolver import MetricResolver
-from .tier2.entity_resolution import EntityResolver
+
+# cuedo-ext: generic entity resolution (extensions/entity-resolution). Optional —
+# serve runs unchanged when the package is not installed.
+try:
+    from coa_entity.serve_hook import build_entity_hook
+except ImportError:  # pragma: no cover - extension not installed
+    build_entity_hook = None
 from .tier2.nl_to_sql.agentic_strategy import AgenticStrategy
 from .tier2.nl_to_sql.sql_generator import SQLGenerator
 from .tier2.nl_to_sql.strategy import NLtoSQLStrategy
@@ -408,20 +414,9 @@ async def _ensure_initialized():
                 oss_ontology_index=oss_ontology_index,
             )
 
-        # Tier-2 entity resolution: similarity search over the namespace's
-        # company/sector index (rebuilt on ontology publish by the entity-index
-        # Lambda, or by hand with scripts/index_entities.py) + an LLM pick.
-        # A namespace with no index resolves to "skipped" — no behavior change.
-        # SERVE_ENTITY_RESOLUTION=off removes the step (and its LLM call) entirely.
-        entity_resolver = (
-            EntityResolver(
-                vector_client=opensearch_client,
-                llm_client=bedrock_client,
-                index_prefix=oss_ontology_index,
-                top_k_companies=int(os.environ.get("SERVE_ENTITY_TOP_K_COMPANIES", "10")),
-                top_k_sectors=int(os.environ.get("SERVE_ENTITY_TOP_K_SECTORS", "5")),
-            )
-            if oss_ontology_index and os.environ.get("SERVE_ENTITY_RESOLUTION", "on").lower() != "off"
+        entity_hook = (  # cuedo-ext
+            build_entity_hook(vector_client=opensearch_client, llm_client=bedrock_client, collection=oss_ontology_index)
+            if build_entity_hook
             else None
         )
         _orchestrator = Orchestrator(
@@ -446,7 +441,7 @@ async def _ensure_initialized():
             agentic_retriever=agentic_retriever,
             tier3_deep_reasoning_default=(config.tier3_strategy == "deep-reasoning"),
             tier1_metric_timeout_s=config.tier1_metric_timeout_s,
-            entity_resolver=entity_resolver,
+            entity_hook=entity_hook,  # cuedo-ext
         )
         _config = config
         logger.info(

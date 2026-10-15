@@ -9,7 +9,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from coa_common import ontology_vector_index_name
@@ -26,11 +26,10 @@ if TYPE_CHECKING:
     from .tier2.skip import Tier2SkipEvaluator
     from .tier3.agentic.retriever import AgenticRetriever
 from .model_validation import validate_model_id as _validate_model_id
-from .models import ConfidenceScore, InvokeRequest, InvokeResponse, QueryResult
+from .models import InvokeRequest, InvokeResponse
 from .response_assembler import ResponseAssembler
 from .step_ids import StepId
 from .tier1.metric_resolver import DeclinedMetricContext, MetricMatch, MetricResolver
-from .tier2.entity_resolution import EntityResolution, EntityResolver, resume_clarification
 from .tier2.skip import Tier2SkipDecision
 from .tier2.sql_firewall import FirewallResult, SQLFirewall
 from .tier2.strategy import (
@@ -123,7 +122,7 @@ class Orchestrator:
         agentic_retriever: AgenticRetriever | None = None,
         tier3_deep_reasoning_default: bool = False,
         tier1_metric_timeout_s: int = 35,
-        entity_resolver: EntityResolver | None = None,
+        entity_hook: Any = None,  # cuedo-ext: extensions/entity-resolution
     ):
         """Wire the per-tier resolvers and optional gating/skip helpers.
 
@@ -149,9 +148,8 @@ class Orchestrator:
                 default for Tier 3 (set when
                 config.tier3_strategy=="deep-reasoning").
             tier1_metric_timeout_s: Configured Tier-1 statement timeout (1..300).
-            entity_resolver: Optional Tier-2 entity resolver (similarity search over
-                the namespace's company/sector index + LLM pick). When None the step
-                is absent and Tier 2 runs exactly as before.
+            entity_hook: cuedo-ext — optional ``coa_entity.serve_hook.EntityHook``
+                (extensions/entity-resolution). None leaves Tier 2 unchanged.
         """
         self._metric_resolver = metric_resolver
         self._knowledge_retriever = knowledge_retriever
@@ -190,9 +188,7 @@ class Orchestrator:
         if not 1 <= tier1_metric_timeout_s <= 300:
             raise ValueError("tier1_metric_timeout_s must be in the range 1..300")
         self._tier1_metric_timeout_s = tier1_metric_timeout_s
-        # Optional Tier-2 entity resolution. Fail-open: a namespace without an
-        # entity index resolves to "skipped" and Tier 2 is unchanged.
-        self._entity_resolver = entity_resolver
+        self._entity_hook = entity_hook  # cuedo-ext
 
     async def resolve(
         self,
@@ -228,16 +224,9 @@ class Orchestrator:
         """
         if trace is None:
             trace = TraceCollector()
-        # The previous turn asked "which company did you mean?" — this message is
-        # the answer. Re-run the ORIGINAL question with the answer attached, and
-        # record that merged question as this turn's query so session history
-        # (and a further clarification) keeps the original intact.
-        if self._entity_resolver is not None:
-            resumed = resume_clarification(request.query, conversation_history)
-            if resumed:
-                logger.info("entity_clarification_resumed", namespace=request.namespace)
-                request.query = resumed
-
+        # cuedo-ext: this turn answers an entity clarification → re-ask the original question.
+        if self._entity_hook is not None and (resumed := self._entity_hook.resume(request.query, conversation_history)):
+            request.query = resumed
         query = request.query
         namespace = request.namespace
         profile = request.profile
@@ -331,14 +320,17 @@ class Orchestrator:
         if await self._should_run_tier2(
             strategy, gating, tier_override, options, query, namespace, query_embedding, trace
         ):
-            # Which company / sector is the question about? Found → handed to SQL
-            # generation; not found / ambiguous → ask the user before querying.
-            entities = await self._resolve_entities(query, namespace, query_embedding, trace, model_id_override)
-            if entities.needs_clarification:
-                return self._clarification_response(entities, trace, namespace, profile, model_id_override)
+            # cuedo-ext: entity resolution — ask the user, or pass entity filters to SQL generation.
             tier2_options = options
-            if entities.prompt_block():
-                tier2_options = {**options, "resolvedEntities": entities.prompt_block()}
+            if self._entity_hook is not None:
+                ext = await self._entity_hook.before_tier2(query, namespace, query_embedding, trace, model_id_override)
+                if ext.clarification:
+                    meta = self._assembler._base_metadata(
+                        namespace, display_principal(profile), model_id=model_id_override
+                    )
+                    return self._entity_hook.clarification_response(ext.clarification, trace, meta)
+                if ext.sql_context:
+                    tier2_options = {**options, "resolvedEntities": ext.sql_context}
             strategy_result, tier2_sparql = await self._run_tier2(
                 query,
                 namespace,
@@ -676,54 +668,6 @@ class Orchestrator:
             return None
 
         return DEFAULT_STRATEGY
-
-    async def _resolve_entities(
-        self,
-        query: str,
-        namespace: str,
-        embedding: list[float] | None,
-        trace: TraceCollector,
-        model_id: str | None,
-    ) -> EntityResolution:
-        """Run the entity resolver (if wired) and record a trace step. Never raises."""
-        if self._entity_resolver is None:
-            return EntityResolution(status="skipped", reason="entity resolver not configured")
-        start = time.perf_counter()
-        resolution = await self._entity_resolver.resolve(query, namespace, embedding=embedding, model_id=model_id)
-        trace.record(
-            StepId.T2_ENTITY_RESOLVE,
-            "skipped" if resolution.status == "skipped" else "success",
-            int((time.perf_counter() - start) * 1000),
-            detail={
-                "status": resolution.status,
-                "companies": [c.name for c in resolution.companies],
-                "sectors": [s.name for s in resolution.sectors],
-                **({"reason": resolution.reason} if resolution.reason else {}),
-            },
-            tool_used="opensearch",
-        )
-        return resolution
-
-    def _clarification_response(
-        self,
-        resolution: EntityResolution,
-        trace: TraceCollector,
-        namespace: str,
-        profile: dict,
-        model_id: str | None,
-    ) -> InvokeResponse:
-        """Answer with the clarification question instead of running a query."""
-        metadata = self._assembler._base_metadata(namespace, display_principal(profile), model_id=model_id)
-        metadata["clarification"] = {"kind": "entity", "status": resolution.status}
-        return InvokeResponse(
-            result=QueryResult(
-                tier=2,
-                confidence=ConfidenceScore(score=0.0, rationale="Entity not resolved — asking the user"),
-                synthesized_answer=resolution.clarification,
-                trace=trace.steps,
-                metadata=metadata,
-            )
-        )
 
     async def _run_tier2(
         self,

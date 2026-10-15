@@ -325,50 +325,6 @@ export class StorageStack extends SCLStack {
     this.opensearchCollectionName = collectionName;
     this.opensearchCollectionArn = collection.attrArn;
 
-    // Opt-in write access to the Tier-2 entity indexes for the operator who runs
-    // packages/context-manager/scripts/index_entities.py (sectors table → vector
-    // DB). Comma-separated IAM role/user ARNs in the `aoss_writer_principal_arns`
-    // context key; absent → no policy, nothing changes. Scoped to the
-    // `{collection}-entities-*` indexes only, so it cannot touch ontology,
-    // metric or GraphRAG indexes. The principal also needs the IAM action
-    // aoss:APIAccessAll on the collection (an admin role already has it).
-    const entityWriterArns = (
-      (this.node.tryGetContext("aoss_writer_principal_arns") as
-        | string
-        | undefined) ?? ""
-    )
-      .split(",")
-      .map((arn) => arn.trim())
-      .filter((arn) => arn.length > 0);
-    if (entityWriterArns.length > 0) {
-      new opensearchserverless.CfnAccessPolicy(this, "OSSEntityIndexWriter", {
-        name: this.prefixed("entity-index-writer"),
-        type: "data",
-        description:
-          "Operator write access to the Tier-2 entity indexes (index_entities.py)",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "index",
-                Resource: [
-                  `index/${collectionName}/${collectionName}-entities-*`,
-                ],
-                Permission: [
-                  "aoss:CreateIndex",
-                  "aoss:DeleteIndex",
-                  "aoss:DescribeIndex",
-                  "aoss:ReadDocument",
-                  "aoss:WriteDocument",
-                ],
-              },
-            ],
-            Principal: entityWriterArns,
-          },
-        ]),
-      });
-    }
-
     // =====================================================================
     //  Athena Query Buckets
     // =====================================================================

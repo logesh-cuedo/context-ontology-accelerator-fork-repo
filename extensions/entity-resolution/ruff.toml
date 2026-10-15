@@ -1,0 +1,7 @@
+# Inherit the repo's rules; the test folder is named entity_tests (not tests/)
+# so pytest does not clash with serve's `tests` package — exempt it the same way.
+extend = "../../ruff.toml"
+
+[lint.per-file-ignores]
+"entity_tests/**" = ["E402", "D"]
+"scripts/**" = ["D"]

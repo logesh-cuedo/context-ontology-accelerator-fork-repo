@@ -335,8 +335,8 @@ class NLtoSQLStrategy:
                 logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
 
         evidence = options.get("evidence", "")[:500]
-        # Set by the orchestrator's entity-resolution step when the question's
-        # companies/sectors were resolved against the sectors table.
+        # cuedo-ext: entity filters from extensions/entity-resolution (set by the
+        # orchestrator hook); empty leaves the prompt as upstream builds it.
         entities = options.get("resolvedEntities", "")
         # Request-scoped: the tool caches this namespace's FK edges and named graphs
         # for the life of the object, and that cache must not outlive a request (a

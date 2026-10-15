@@ -23,7 +23,7 @@ from typing import Any
 import boto3
 import structlog
 
-from coa_control_plane.namespace.cleanup import delete_entity_index, delete_graphrag_indexes
+from coa_control_plane.namespace.cleanup import delete_graphrag_indexes
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +86,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Step Functions task: delete every source for the namespace.
 
     Input: {"namespaceId": str}
-    Output: {"sourcesDeleted": int, "graphragIndexesDeleted": list[str], "entityIndexDeleted": bool}
+    Output: {"sourcesDeleted": int, "graphragIndexesDeleted": list[str]}
 
     Raises on any failure so the state machine's retry/catch policy applies
     (see the pipeline construct — this step retries 3x before the chain
@@ -120,9 +120,4 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     logger.info("namespace_sources_deleted", namespace_id=namespace_id, count=deleted)
 
     graphrag_removed = delete_graphrag_indexes(namespace_id)
-    entity_index_removed = delete_entity_index(namespace_id)
-    return {
-        "sourcesDeleted": deleted,
-        "graphragIndexesDeleted": graphrag_removed,
-        "entityIndexDeleted": entity_index_removed,
-    }
+    return {"sourcesDeleted": deleted, "graphragIndexesDeleted": graphrag_removed}

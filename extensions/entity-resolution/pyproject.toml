@@ -1,0 +1,15 @@
+[project]
+name = "coa-entity-resolution"
+version = "0.1.0"
+description = "Generic Tier-2 entity resolution extension for Context Ontology Accelerator"
+requires-python = ">=3.12"
+# coa-common and structlog are already in serve's image and the Lambda bundle;
+# serve's Dockerfile installs this package with --no-deps.
+dependencies = ["coa-common", "boto3>=1.35.0", "structlog>=24.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coa_entity"]

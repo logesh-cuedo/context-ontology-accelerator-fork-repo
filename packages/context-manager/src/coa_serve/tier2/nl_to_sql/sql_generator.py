@@ -208,26 +208,8 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
 
 _SHARED_RULES = (
     "- Use ONLY the tables and columns provided in the schema — NEVER invent names\n"
-    # Company names: always a case-insensitive substring match, never equality.
-    # Placed second so it is read before anything else about filtering.
-    # A 'Resolved entities' section (_entities_block) takes precedence: it carries the
-    # full resolved name, which the user's words ("TCS") may not substring-match. This
-    # rule is the fallback for when entity resolution is skipped (no entity index,
-    # SERVE_ENTITY_RESOLUTION=off, or a fail-open error).
-    "- COMPANY NAME FILTERS: if the prompt has a 'Resolved entities' section, use exactly "
-    "the company filters it gives and do not rebuild them from the user's words. Otherwise, "
-    "whenever you filter on a column named company_name, in any "
-    "table, write LOWER(company_name) LIKE '%<name>%'. NEVER write company_name = '...' "
-    "and never compare company_name with = or IN, even when the user gives the full "
-    "official name. Build <name> from the user's words: lower-case it, drop a trailing "
-    "corporate suffix (ltd, limited, pvt, private, inc, corp, corporation, co) and double "
-    "any single quote. Never build it from a generic word alone (company, group, holdings, "
-    "enterprises, india, indian). For several companies, OR one LIKE per company inside "
-    "parentheses. Examples: 'Bajaj Auto Limited' -> LOWER(company_name) LIKE '%bajaj auto%'; "
-    "'grindwell' -> LOWER(company_name) LIKE '%grindwell%'\n"
     "- When a column lists 'allowed values: [...]', filter it using one of those "
-    "exact literals (matching case); do not alter case or invent a value. This does "
-    "not apply to company_name, which always uses the LIKE rule above\n"
+    "exact literals (matching case); do not alter case or invent a value\n"
     "- Use the FK relationship comments (-- FK: ...) to construct correct JOINs\n"
     "- Use table aliases for readability in multi-table queries\n"
     "- Handle potential NULLs with COALESCE where aggregation results could be empty\n"
@@ -254,7 +236,7 @@ _SHARED_RULES = (
     "repeat across joined rows\n"
     "- Return the SQL in a ```sql code block\n"
     "- After the query, rate your confidence (0.0-1.0) that this query "
-    "correctly answers the question\n"
+    "correctly answers the question"
 )
 
 _EXAMPLE_SCHEMA = (
@@ -277,16 +259,9 @@ _EXAMPLE_SCHEMA = (
 )
 
 
-def _entities_block(entities: str) -> str:
-    """Prompt section for entities resolved by the Tier-2 entity resolver.
-
-    Unlike ``evidence`` (free text from the caller, untrusted), this is produced
-    by the pipeline from the sectors table, so the writer must filter on exactly
-    these entities rather than re-deriving a pattern from the user's words.
-    """
-    if not entities:
-        return ""
-    return f"\n## Resolved entities (authoritative)\n{entities}\n"
+def _ext_entities(entities: str) -> str:
+    """cuedo-ext: the entity-resolution section (extensions/entity-resolution), or nothing."""
+    return f"\n{entities}\n" if entities else ""
 
 
 def _build_system_prompt(dialect: str) -> str:
@@ -296,7 +271,7 @@ def _build_system_prompt(dialect: str) -> str:
         f"You are a SQL query generator for a data warehouse running on "
         f"{config['engine_description']}.\n\n"
         f"CRITICAL RULES:\n"
-        f"{_SHARED_RULES}"
+        f"{_SHARED_RULES}\n"
         f"{config['syntax_rules']}\n\n"
         f"Example:\n\n"
         f"Schema:\n{_EXAMPLE_SCHEMA}\n\n"
@@ -449,7 +424,7 @@ class SQLGenerator:
         dialect: str | None = None,
         graph_expander: GraphExpander | None = None,
         governed_metric: str = "",
-        entities: str = "",
+        entities: str = "",  # cuedo-ext: entity-resolution prompt section
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -476,8 +451,8 @@ class SQLGenerator:
                 Tier-1 matched but declined (see
                 ``DeclinedMetricContext.prompt_block``). Empty — the default —
                 leaves the prompt byte-identical to the pre-change baseline.
-            entities: Companies/sectors resolved by the Tier-2 entity resolver,
-                rendered as an authoritative prompt section. Empty → no section.
+            entities: cuedo-ext — entity-resolution prompt section
+                (extensions/entity-resolution). Empty → no section.
         """
         trace: list[dict[str, Any]] = []
 
@@ -681,7 +656,7 @@ class SQLGenerator:
                 model_id=model_id,
                 dialect=dialect,
                 governed_metric=governed_metric,
-                entities=entities,
+                entities=entities,  # cuedo-ext
             )
             trace.append({"step": "generate_sql", "status": "ok", "ms": _ms(start), "confidence": confidence})
         except Exception as e:
@@ -761,7 +736,7 @@ class SQLGenerator:
         evidence: str = "",
         model_id: str | None = None,
         governed_metric: str = "",
-        entities: str = "",
+        entities: str = "",  # cuedo-ext: entity-resolution prompt section
     ) -> tuple[str, float]:
         """LLM-driven repair of a SQL statement that failed to execute.
 
@@ -800,7 +775,7 @@ class SQLGenerator:
         prompt = (
             f"## Database Schema (relevant tables)\n```sql\n{ddl_context}\n```\n"
             f"{governed_metric_block}"
-            f"{_entities_block(entities)}"
+            f"{_ext_entities(entities)}"  # cuedo-ext
             f"{evidence_block}"
             f"\n## Question\n{question}\n\n"
             f"## Previous attempt (FAILED)\n```sql\n{failed_sql}\n```\n"
@@ -850,7 +825,7 @@ class SQLGenerator:
         dialect: str | None = None,
         feedback: str = "",
         governed_metric: str = "",
-        entities: str = "",
+        entities: str = "",  # cuedo-ext: entity-resolution prompt section
     ) -> tuple[str, float]:
         """Call LLM to generate SQL from question and DDL context.
 
@@ -871,7 +846,7 @@ class SQLGenerator:
                 which is labelled untrusted user input and truncated to 500
                 chars. Given, the writer extends the governed formula instead of
                 reinventing one.
-            entities: Resolved companies/sectors (see :func:`_entities_block`).
+            entities: cuedo-ext — entity-resolution prompt section. Empty → none.
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -914,7 +889,7 @@ class SQLGenerator:
         prompt = (
             f"## Database Schema (relevant tables)\n```sql\n{ddl_context}\n```\n"
             f"{governed_metric_block}"
-            f"{_entities_block(entities)}"
+            f"{_ext_entities(entities)}"  # cuedo-ext
             f"{evidence_block}"
             f"{feedback_block}\n"
             "Return the SQL in a ```sql code block.\n"

@@ -15,6 +15,10 @@
 !packages/context-manager/pyproject.toml
 !packages/context-manager/src/
 
+# cuedo-ext: entity-resolution extension (installed last by the serve Dockerfile)
+!extensions/entity-resolution/pyproject.toml
+!extensions/entity-resolution/src/
+
 # Allow MCP server package (same image, different entrypoint)
 !packages/mcp-server/pyproject.toml
 !packages/mcp-server/src/

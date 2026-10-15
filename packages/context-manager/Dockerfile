@@ -38,6 +38,12 @@ RUN pip install --no-cache-dir uv && \
     pip install --no-cache-dir --upgrade pip "setuptools>=78.1.1" && \
     pip uninstall -y msgpack
 
+# cuedo-ext: generic entity resolution (extensions/entity-resolution). Installed
+# last and --no-deps (its deps are already above) so changing the extension does
+# not invalidate the slow dependency layer.
+COPY extensions/entity-resolution/ /tmp/entity-resolution/
+RUN pip install --no-cache-dir --no-deps /tmp/entity-resolution/ && rm -rf /tmp/entity-resolution/
+
 EXPOSE 8080
 
 USER appuser

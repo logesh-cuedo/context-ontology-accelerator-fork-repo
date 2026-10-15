@@ -13,6 +13,7 @@ import {
   DEFAULT_ENV,
 } from "../lib/constants";
 import { Paths } from "../lib/paths";
+import { EntityResolutionStack } from "../lib/stacks/extensions/entity-resolution-stack"; // cuedo-ext
 import { SsmConfig, CustomDomainConfig, IdpType } from "../lib/types";
 import {
   resolveAgentCoreAzNames,
@@ -414,6 +415,19 @@ async function deploy(): Promise<void> {
   });
   serve.addDependency(smusDomain); // needs /namespace/namespaces-table-name SSM param
   serve.addDependency(auth); // needs /issuer, /userpool-client-id, /mcp-client-id SSM params
+
+  // cuedo-ext: generic entity resolution (extensions/entity-resolution).
+  const entityExt = new EntityResolutionStack(
+    app,
+    `${stackPrefix}-entity-ext`,
+    {
+      vpc: network.vpc,
+      lambdaSecurityGroup: network.lambdaSecurityGroup,
+      athenaResultsBucketName: storage.athenaResultsBucket.bucketName,
+      alarmAction,
+    },
+  );
+  entityExt.addDependency(smusDomain); // needs /namespace/namespaces-table-name SSM param
 
   const sources = new SourcesStack(app, `${stackPrefix}-sources`, {
     network,

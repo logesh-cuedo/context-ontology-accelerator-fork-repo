@@ -14,13 +14,18 @@
  * serve layer. Keep this in sync with the backend trace.record() call sites.
  */
 
+import {
+  ENTITY_STEP_DISPLAY_NAMES,
+  ENTITY_STEP_LABELS,
+} from "../../extensions/entity-resolution"; // cuedo-ext
+
 /** Short, present-tense labels shown while a step is the current/live step. */
 export const STEP_LABELS: Record<string, string> = {
+  ...ENTITY_STEP_LABELS, // cuedo-ext
   "t1.metric_match": "Searching metric catalog",
   "t1.execute": "Running query",
   "query.embed": "Embedding query",
   "routing.select": "Routing query",
-  "t2.entity.resolve": "Resolving companies",
   "t2.sql.generate": "Generating SQL",
   "t2.sql.execute": "Running query",
   "t2.vkg.context": "Loading ontology context",
@@ -59,13 +64,13 @@ export const STEP_LABELS: Record<string, string> = {
 
 /** Noun-phrase labels shown in the detailed execution plan (RationalePanel). */
 export const STEP_DISPLAY_NAMES: Record<string, string> = {
+  ...ENTITY_STEP_DISPLAY_NAMES, // cuedo-ext
   "t1.metric_match": "Match metric",
   "t1.authorize": "Cedar authorize",
   "t1.firewall": "SQL Firewall",
   "t1.execute": "Execute metric query",
   "query.embed": "Embed query",
   "routing.select": "Route intent",
-  "t2.entity.resolve": "Resolve entities",
   "t2.sql.generate": "Generate SQL",
   "t2.sql.authorize": "Cedar authorize",
   "t2.sql.firewall": "SQL Firewall",
