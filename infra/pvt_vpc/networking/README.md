@@ -9,8 +9,14 @@ deployment imports these; it creates no networking itself.
 
 | Template | Creates | Apply |
 |---|---|---|
-| `coa-networking-security-groups.yaml` | **all** security groups — 8 application + 1 shared for the endpoints — and the 12 rules (21 resources) | **first** |
+| `coa-cdk-staging.yaml` | the CDK staging bucket and container repository (3 resources) | any time |
+| `coa-networking-security-groups.yaml` | **all** security groups — 8 application + 1 shared for the endpoints — and the 12 rules (21 resources) | **first of the two** |
 | `coa-networking-vpc-endpoints.yaml` | 22 endpoints, no security groups (22 resources) | second |
+
+`coa-cdk-staging.yaml` replaces `cdk bootstrap`, which cannot run in an account
+that denies `iam:CreateRole` — it would create five IAM roles. The two
+resources it makes need no IAM permission at all. **Do not also run
+`cdk bootstrap`.**
 
 The split is by resource type: **every security group is in the first file, every
 endpoint in the second.**
@@ -33,6 +39,11 @@ pasting the `InterfaceEndpointSecurityGroupId` from the first stack's Outputs.
 **CLI:**
 
 ```bash
+# CDK staging - any time, nothing references it
+aws cloudformation deploy \
+  --stack-name coa-cdk-staging \
+  --template-file coa-cdk-staging.yaml
+
 # 1 of 2 - all security groups
 aws cloudformation deploy \
   --stack-name coa-networking-security-groups \
@@ -177,8 +188,15 @@ From **`coa-networking-security-groups`**:
 | `AgentCoreSecurityGroupId` | `securityGroups.agentCore` |
 | `McpSecurityGroupId` | `securityGroups.mcp` |
 
-That stack has a **seventh** output, `InterfaceEndpointSecurityGroupId`, which
+That stack has a **ninth** output, `InterfaceEndpointSecurityGroupId`, which
 does **not** go into the config — it is a parameter of the endpoints template.
+
+From **`coa-cdk-staging`**:
+
+| Output | Goes into config.json |
+|---|---|
+| `StagingBucketName` | `staging.bucketName` |
+| `ContainerRepositoryName` | `staging.repositoryName` |
 
 From **`coa-networking-vpc-endpoints`** — one value, out of 22 endpoints:
 

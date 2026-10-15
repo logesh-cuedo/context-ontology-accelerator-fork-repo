@@ -1,0 +1,162 @@
+# ============================================================================
+# Context Ontology Accelerator - CDK staging (bucket + container repository)
+# ============================================================================
+#
+# Where the deployment uploads Lambda zips and container images before
+# CloudFormation reads them.
+#
+#   3 resources:  1 S3 bucket + 1 bucket policy + 1 ECR repository
+#
+# WHY THIS EXISTS INSTEAD OF `cdk bootstrap`
+#
+# `cdk bootstrap` creates these two AND FIVE IAM ROLES that the deployment
+# then assumes. An account that denies `iam:CreateRole` cannot run it, so the
+# deployment could never start -- whatever the application itself creates.
+#
+# These two resources need NO IAM permission, so they can be created here and
+# named in pvt_vpc/config.json under `staging`. The app then uses
+# CliCredentialsStackSynthesizer: it publishes assets with the caller's own
+# credentials and assumes no role at all.
+#
+# Do NOT also run `cdk bootstrap`. It is unnecessary once `staging` is set, and
+# it would create the five roles this whole approach exists to avoid.
+#
+# Settings mirror the ones `cdk bootstrap` applies to its own staging bucket:
+# versioning on, encryption on, public access blocked, old versions expired
+# after 30 days. Apply it in any order relative to the other two templates --
+# nothing references them.
+#
+# Apply:
+#   aws cloudformation deploy \
+#     --stack-name coa-cdk-staging \
+#     --template-file coa-cdk-staging.yaml
+#
+# Then copy the Outputs into pvt_vpc/config.json under `staging`.
+# ============================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Context Ontology Accelerator - CDK staging bucket and container repository,
+  replacing `cdk bootstrap` in an account that denies iam:CreateRole. Outputs
+  feed pvt_vpc/config.json staging.*
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: coa
+    Description: Resource name prefix. Must match pvt_vpc/config.json
+  EnvName:
+    Type: String
+    Default: dev
+    Description: Environment name. Must match pvt_vpc/config.json
+
+Resources:
+
+  # ==========================================================================
+  # File assets - Lambda zips, nested templates, static site content
+  #
+  # -> config.json  staging.bucketName
+  #
+  # The account id and region are in the name because S3 bucket names are
+  # globally unique, and the same prefix/env pair is used in every account.
+  # ==========================================================================
+  StagingBucket:
+    Type: AWS::S3::Bucket
+    # Retained deliberately: deleting the stack must not take the deployment's
+    # assets with it, and a non-empty bucket would block the delete anyway.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${Prefix}-${EnvName}-cdk-assets-${AWS::AccountId}-${AWS::Region}'
+      # SSE-S3 rather than SSE-KMS: bootstrap's own default creates a KMS key,
+      # and a key policy is one more thing to get right for no benefit here.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # CDK addresses assets by content hash, so a redeploy of unchanged code
+      # rewrites the same key. Versioning keeps a rollback honest.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+        - Id: CleanupOldVersions
+          Status: Enabled
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 30
+        - Id: AbortIncompleteMultipartUploads
+          Status: Enabled
+          AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 1
+
+  # Refuse anything not using TLS. Bootstrap sets the equivalent; without it
+  # the bucket accepts plaintext HTTP, which an account-level guardrail or an
+  # audit will flag.
+  StagingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StagingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: DenyInsecureTransport
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:*'
+          Resource:
+          - !GetAtt StagingBucket.Arn
+          - !Sub '${StagingBucket.Arn}/*'
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+
+  # ==========================================================================
+  # Container images - the ontology engine, VKG and AgentCore runtimes
+  #
+  # -> config.json  staging.repositoryName
+  #
+  # ONE repository for every image: CDK distinguishes them by tag, which is
+  # the content hash, so separate repositories would gain nothing.
+  # ==========================================================================
+  ContainerAssetsRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub '${Prefix}-${EnvName}-cdk-images'
+      # IMMUTABLE would be wrong: CDK's tag is a content hash, so a re-push of
+      # identical content targets the same tag and would be rejected.
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Untagged images should not exist, but expire any older than one year",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 365
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+Outputs:
+  StagingBucketName:
+    Value: !Ref StagingBucket
+    Description: -> config.json  staging.bucketName
+  ContainerRepositoryName:
+    Value: !Ref ContainerAssetsRepository
+    Description: -> config.json  staging.repositoryName

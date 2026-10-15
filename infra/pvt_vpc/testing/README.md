@@ -54,9 +54,9 @@ In this order:
 
 1. **VPC, NAT, subnets, route tables.** Subnets in **us-east-1b and
    us-east-1c** — the one choice that cannot be changed later.
-2. **An S3 bucket and an ECR repository** for CDK staging. Any names.
-   Do **not** run `cdk bootstrap`; `staging` in `pvt_vpc/config.json` replaces
-   it, and bootstrap would create five IAM roles the client's account denies.
+2. **`pvt_vpc/networking/coa-cdk-staging.yaml`** — the staging bucket and
+   container repository. Do **not** run `cdk bootstrap`; this replaces it, and
+   bootstrap would create five IAM roles the client's account denies.
 3. **`pvt_vpc/networking/coa-networking-security-groups.yaml`**, then
    **`coa-networking-vpc-endpoints.yaml`** (the second takes
    `InterfaceEndpointSecurityGroupId` from the first).
