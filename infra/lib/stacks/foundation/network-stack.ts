@@ -9,6 +9,7 @@ import { Construct } from "constructs";
 
 import { SCLStack } from "../../constructs";
 import { resolveContext } from "../../context";
+import { loadPvtVpcConfig, type PvtVpcConfig } from "../../pvt-vpc-config";
 import {
   JdbcConnectivity,
   type PeeringConfig,
@@ -51,20 +52,25 @@ export class NetworkStack extends SCLStack {
   /** The platform VPC shared by all SemanticContext workloads. */
   public readonly vpc: ec2.IVpc;
 
+  // The six security groups are typed as the INTERFACE, not the concrete
+  // class, because a private-VPC deployment imports them instead of creating
+  // them (see `importSecurityGroups` below). Consumers only ever read the id
+  // or pass them as a peer, so the interface is sufficient.
+
   /** Security group for the Neptune graph-database cluster (port 8182). */
-  public readonly neptuneSecurityGroup: ec2.SecurityGroup;
+  public readonly neptuneSecurityGroup: ec2.ISecurityGroup;
 
   /** Security group for ECS Fargate tasks. */
-  public readonly ecsSecurityGroup: ec2.SecurityGroup;
+  public readonly ecsSecurityGroup: ec2.ISecurityGroup;
 
   /** Security group for Lambda functions. */
-  public readonly lambdaSecurityGroup: ec2.SecurityGroup;
+  public readonly lambdaSecurityGroup: ec2.ISecurityGroup;
 
   /** Port-80 egress used only by direct Snowflake discovery for OCSP. */
-  public readonly discoveryOcspSecurityGroup: ec2.SecurityGroup;
+  public readonly discoveryOcspSecurityGroup: ec2.ISecurityGroup;
 
   /** Security group for the AOSS VPC endpoint (port 443). */
-  public readonly aossSecurityGroup: ec2.SecurityGroup;
+  public readonly aossSecurityGroup: ec2.ISecurityGroup;
   /** EC2 Interface VPC Endpoint ID for AOSS (NextGen *.on.aws private DNS). */
   public readonly aossVpcEndpointId: string;
 
@@ -72,7 +78,7 @@ export class NetworkStack extends SCLStack {
   public readonly serviceNamespace: servicediscovery.PrivateDnsNamespace;
 
   /** Security group for Glue Connections to reach source databases. */
-  public readonly connectorSecurityGroup: ec2.SecurityGroup;
+  public readonly connectorSecurityGroup: ec2.ISecurityGroup;
 
   constructor(scope: Construct, id: string, props?: NetworkStackProps) {
     super(scope, id, props);
@@ -84,8 +90,30 @@ export class NetworkStack extends SCLStack {
       | undefined;
 
     if (existingVpcId) {
-      this.vpc = ec2.Vpc.fromLookup(this, "ImportedVpc", {
+      // Imported from the CONFIG, not via `Vpc.fromLookup`.
+      //
+      // `fromLookup` calls EC2 at synth time, and without credentials it does
+      // not fail — it returns DUMMY values (`vpc-12345`, subnets `p-12345`,
+      // zones `dummy1a`) and the synth succeeds. A CI synth, or any developer
+      // without credentials for the target account, would therefore produce a
+      // template full of subnet ids that do not exist, which only fails at
+      // deploy time with a confusing error about the wrong VPC.
+      //
+      // It also DISCOVERS which subnets are private, by reading AWS tags. In a
+      // pre-created VPC owned by a network team those tags may not follow
+      // CDK's convention, so the lookup can select the wrong subnets or none.
+      //
+      // The config names the subnets, their zones and their route tables
+      // explicitly, so the synth needs no credentials and places resources in
+      // exactly the subnets the operator nominated. `validate()` has already
+      // proven all four fields are present and positionally consistent.
+      const network = loadPvtVpcConfig(this).vpc!;
+      this.vpc = ec2.Vpc.fromVpcAttributes(this, "ImportedVpc", {
         vpcId: existingVpcId,
+        vpcCidrBlock: network.cidr!,
+        availabilityZones: network.availabilityZones!,
+        privateSubnetIds: network.privateSubnetIds!,
+        privateSubnetRouteTableIds: network.privateRouteTableIds!,
       });
     } else {
       // Pin VPC AZs to AgentCore-supported physical zones. AZ *names*
@@ -229,6 +257,47 @@ export class NetworkStack extends SCLStack {
     }
 
     // ── Security Groups ──────────────────────────────────────────────
+    //
+    // PRIVATE-VPC MODE: the six groups and all their rules were created
+    // externally by the networking package, because a locked-down account
+    // denies the pipeline `ec2:CreateSecurityGroup`. Import them and return
+    // before the creation block below.
+    //
+    // This branch is load-bearing. Without it, importing a VPC still created
+    // six NEW groups inside it — leaving twelve in the account, with the app
+    // silently using its own and ignoring the ones the network team made.
+    const pvtVpc = loadPvtVpcConfig(this);
+    if (pvtVpc.privateVpcMode) {
+      const imported = this.importSecurityGroups(pvtVpc);
+      this.neptuneSecurityGroup = imported.neptune;
+      this.ecsSecurityGroup = imported.ecs;
+      this.lambdaSecurityGroup = imported.lambda;
+      this.aossSecurityGroup = imported.aoss;
+      this.connectorSecurityGroup = imported.connector;
+      this.discoveryOcspSecurityGroup = imported.discoveryOcsp;
+
+      // The AOSS DATA-PLANE endpoint id, which StorageStack names explicitly
+      // in the OpenSearch Serverless network policy's `SourceVPCEs`.
+      //
+      // This is the one endpoint id the synth genuinely needs. Before this
+      // assignment existed, `aossVpcEndpointId` was set ONLY inside the
+      // create-the-VPC branch below, so importing a VPC left it undefined and
+      // the network policy went out as `"SourceVPCEs": [undefined]`. In dev
+      // the separate `AllowFromPublic: true` rule masked that — the vector
+      // store stayed reachable, but publicly. In tst/demo/prod there is no
+      // mask and nothing could reach the collection at all.
+      //
+      // `validate()` has already proven the value is present in private mode.
+      this.aossVpcEndpointId = pvtVpc.vpcEndpoints!.aossData!;
+
+      // The Cloud Map namespace is an APPLICATION resource, not pre-created
+      // infrastructure — nothing in a locked-down account forbids
+      // servicediscovery:CreatePrivateDnsNamespace. It is created in both
+      // flows, and only the security groups above differ.
+      this.serviceNamespace = this.createServiceNamespace();
+      this.emitNetworkOutputs();
+      return;
+    }
 
     // Neptune - allow inbound 8182 from the ECS + Lambda SGs only (not the
     // whole VPC CIDR). Neptune is a database; it never initiates connections,
@@ -284,7 +353,7 @@ export class NetworkStack extends SCLStack {
       ? connectorEgressCidrs.join(",")
       : "anywhere";
     const addConfiguredOcspEgress = (
-      securityGroup: ec2.SecurityGroup,
+      securityGroup: ec2.ISecurityGroup,
       workload: string,
     ): void => {
       if (this.ctxString("connector_ocsp_egress") === "false") return;
@@ -381,14 +450,7 @@ export class NetworkStack extends SCLStack {
     );
 
     // ── Cloud Map Namespace ────────────────────────────────────────────
-    this.serviceNamespace = new servicediscovery.PrivateDnsNamespace(
-      this,
-      "ServiceNamespace",
-      {
-        name: `${this.prefixed("services")}.local`,
-        vpc: this.vpc,
-      },
-    );
+    this.serviceNamespace = this.createServiceNamespace();
 
     // Connector SG — used by Glue Connections to reach source databases.
     // Egress restricted to least privilege: the supported source-DB
@@ -470,17 +532,84 @@ export class NetworkStack extends SCLStack {
       this.addJdbcConnectivity(this.vpc as ec2.Vpc);
     }
 
-    // ── CfnOutputs ──────────────────────────────────────────────────
+    this.emitNetworkOutputs();
+  }
+
+  /**
+   * Import the six security groups a private-VPC deployment expects to already
+   * exist, instead of creating them.
+   *
+   * No rules are added. The networking package that created these groups also
+   * created every ingress and egress rule — Neptune 8182 from Lambda and ECS,
+   * the connector self-reference Glue and Athena require, the five database
+   * ports, OCSP on 80 — and adding them again from here would either fail or
+   * silently drift from what the network team applied.
+   *
+   * `mutable: false` makes that explicit: CDK then refuses any later
+   * `addEgressRule` on these objects rather than generating a rule that would
+   * never be applied, so a future caller gets a synth error instead of a
+   * connectivity bug.
+   */
+  /**
+   * The shared Cloud Map private DNS namespace, so services resolve each other
+   * by stable name rather than an address that changes on every task restart.
+   * `ontology-engine.<prefix>-<env>-services.local` is the one the API proxy
+   * depends on.
+   */
+  private createServiceNamespace(): servicediscovery.PrivateDnsNamespace {
+    return new servicediscovery.PrivateDnsNamespace(this, "ServiceNamespace", {
+      name: `${this.prefixed("services")}.local`,
+      vpc: this.vpc,
+    });
+  }
+
+  private importSecurityGroups(config: PvtVpcConfig): {
+    neptune: ec2.ISecurityGroup;
+    ecs: ec2.ISecurityGroup;
+    lambda: ec2.ISecurityGroup;
+    aoss: ec2.ISecurityGroup;
+    connector: ec2.ISecurityGroup;
+    discoveryOcsp: ec2.ISecurityGroup;
+  } {
+    const groups = config.securityGroups ?? {};
+
+    const importGroup = (id: string, logicalId: string): ec2.ISecurityGroup =>
+      ec2.SecurityGroup.fromSecurityGroupId(this, logicalId, id, {
+        mutable: false,
+      });
+
+    // validate() in pvt-vpc-config has already proven all six are present, so
+    // the non-null assertions here cannot fire at runtime.
+    return {
+      neptune: importGroup(groups.neptune!, "ImportedNeptuneSG"),
+      ecs: importGroup(groups.ecs!, "ImportedEcsSG"),
+      lambda: importGroup(groups.lambda!, "ImportedLambdaSG"),
+      aoss: importGroup(groups.aossVpce!, "ImportedAossSG"),
+      connector: importGroup(groups.connector!, "ImportedConnectorSG"),
+      discoveryOcsp: importGroup(
+        groups.discoveryOcsp!,
+        "ImportedDiscoveryOcspSG",
+      ),
+    };
+  }
+
+  /**
+   * Publish the VPC id, private subnet ids and Cloud Map namespace.
+   *
+   * Emitted in both deployment flows: a private-VPC deployment still has to
+   * publish these, because the SSM parameters are the cross-app contract that
+   * other CDK apps (today the COA-operated Databricks connector) read to
+   * attach their own compute to this VPC.
+   */
+  private emitNetworkOutputs(): void {
     new cdk.CfnOutput(this, "VpcId", {
       value: this.vpc.vpcId,
       description: "SemanticContext VPC ID",
     });
 
-    // For CDK apps outside this one that attach compute to this VPC, today the COA-operated
-    // Databricks connector. Its deploy script reads both and passes them in as variables:
-    // SSM parameters are the cross-app contract here, and an SSM StringList read inside the
-    // other stack would be a list token of unknown length, which Vpc.fromVpcAttributes cannot
-    // map to subnets.
+    // SSM rather than a CloudFormation export: an SSM StringList read inside
+    // the other stack would be a list token of unknown length, which
+    // Vpc.fromVpcAttributes cannot map to subnets.
     const { ssmPrefix, envName } = resolveContext(this.node);
     new ssm.StringParameter(this, "SsmVpcId", {
       parameterName: `${ssmPrefix}/${envName}/network/vpc-id`,

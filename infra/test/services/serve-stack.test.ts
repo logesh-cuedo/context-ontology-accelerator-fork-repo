@@ -422,9 +422,13 @@ describe("ServeStack - custom Athena federation connector IAM", () => {
     // Scope to the runtime's own role: collecting across every policy in the
     // stack would let a statement mistakenly attached to the AOSS proxy Lambda
     // satisfy all of these assertions.
+    // Matches "AgentCoreRuntimeExecRole", the logical id the role now gets
+    // from PvtVpcRoles — it is created explicitly so it can carry a
+    // pre-createable physical name in a locked-down account, rather than the
+    // CDK-implicit "AgentCoreRuntimeExecutionRole" it had before.
     const runtimeRolePolicy = policies.find((p: any) =>
       String(p.Properties?.PolicyName ?? "").includes(
-        "AgentCoreRuntimeExecutionRole",
+        "AgentCoreRuntimeExecRole",
       ),
     );
     expect(runtimeRolePolicy).toBeDefined();
@@ -881,7 +885,6 @@ describe("ServeStack - GRAPH_URI_TEMPLATE reader/writer alignment", () => {
   });
 });
 
-
 describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
   const envOf = (template: Template): Record<string, unknown> => {
     const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
@@ -898,9 +901,9 @@ describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
     // The load-bearing case: a numeric 0 in cdk.json context is falsy in JS, so a
     // truthiness check would drop it. serve-stack uses `!== undefined`, so it must
     // survive as "0" and be clamped downstream rather than silently ignored.
-    expect(envOf(createStack({ serve_vkg_translation_timeout_s: 0 }))).toMatchObject(
-      { SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" },
-    );
+    expect(
+      envOf(createStack({ serve_vkg_translation_timeout_s: 0 })),
+    ).toMatchObject({ SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" });
   });
 
   it("passes a set value through verbatim", () => {

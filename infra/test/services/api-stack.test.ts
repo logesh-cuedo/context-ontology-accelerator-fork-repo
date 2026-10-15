@@ -50,6 +50,9 @@ describe("ApiStack authorizer — ARCHIVED guard wiring", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
 
     template = Template.fromStack(
@@ -57,6 +60,7 @@ describe("ApiStack authorizer — ARCHIVED guard wiring", () => {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -119,6 +123,9 @@ describe("ApiStack OE monitoring", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
 
     template = Template.fromStack(
@@ -126,6 +133,7 @@ describe("ApiStack OE monitoring", () => {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -147,12 +155,16 @@ describe("ApiStack WAF WebACL", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
     return Template.fromStack(
       new ApiStack(app, "TestApiWaf", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -226,12 +238,16 @@ describe("ApiStack request throttling", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
     return Template.fromStack(
       new ApiStack(app, "TestApiThrottle", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -298,6 +314,9 @@ describe("ApiStack cache invalidation stream handler", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
 
     template = Template.fromStack(
@@ -305,6 +324,7 @@ describe("ApiStack cache invalidation stream handler", () => {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -400,11 +420,15 @@ describe("ApiStack GET /health", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
     return new ApiStack(app, "TestApiHealth", {
       env: { account: "123456789012", region: "us-east-1" },
       allowedOrigin,
       vpc,
+      lambdaSecurityGroup,
       rolesTable: mkTable("Roles"),
       resourceRoleMappingsTable: mkTable("RRM"),
       cacheInvalidationTable: mkTable("Cache"),
@@ -467,13 +491,12 @@ describe("ApiStack GET /health", () => {
   });
 
   it("echoes the configured CORS origin, not a wildcard", () => {
-    const params =
-      healthGet(mkStack("https://app.example.com"))[
-        "x-amazon-apigateway-integration"
-      ].responses.default.responseParameters;
-    expect(
-      params["method.response.header.Access-Control-Allow-Origin"],
-    ).toBe("'https://app.example.com'");
+    const params = healthGet(mkStack("https://app.example.com"))[
+      "x-amazon-apigateway-integration"
+    ].responses.default.responseParameters;
+    expect(params["method.response.header.Access-Control-Allow-Origin"]).toBe(
+      "'https://app.example.com'",
+    );
   });
 });
 
@@ -509,12 +532,16 @@ describe("ApiStack 501-stub guard", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+    });
     const mkTable = (id: string) => mkTestTable(depStack, id);
     return () =>
       new ApiStack(app, "TestApiStubGuard", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
+        lambdaSecurityGroup,
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),

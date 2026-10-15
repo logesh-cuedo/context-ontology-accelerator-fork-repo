@@ -8,6 +8,8 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 
+import { PvtVpcRoles } from "../pvt-vpc-roles";
+
 export interface LakeFormationAdminProps {
   /** SSM parameter name holding the IAM role ARN to register as an LF data-lake admin. */
   readonly roleArnSsmParameterName: string;
@@ -51,7 +53,12 @@ export class LakeFormationAdmin extends Construct {
   constructor(scope: Construct, id: string, props: LakeFormationAdminProps) {
     super(scope, id);
 
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
+
     const onEvent = new lambda.Function(this, "OnEvent", {
+      role: roles.forService("lakeformationAdminOnEvent", "lambda"),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       timeout: cdk.Duration.minutes(2),
@@ -86,6 +93,12 @@ export class LakeFormationAdmin extends Construct {
 
     const provider = new Provider(this, "Provider", {
       onEventHandler: onEvent,
+      // The framework Lambda needs its own role; Provider creates one
+      // CloudFormation names at deploy time otherwise.
+      frameworkOnEventRole: roles.forService(
+        "lakeformationAdminFramework",
+        "lambda",
+      ),
     });
     new cdk.CustomResource(this, "Resource", {
       serviceToken: provider.serviceToken,

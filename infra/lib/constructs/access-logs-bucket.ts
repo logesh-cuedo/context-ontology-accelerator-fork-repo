@@ -6,6 +6,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 import { SCLConstruct } from "./scl-construct";
 import { resolveContext } from "../context";
+import { loadPvtVpcConfig } from "../pvt-vpc-config";
 
 export interface AccessLogsBucketProps {
   /**
@@ -70,7 +71,10 @@ export class AccessLogsBucket extends SCLConstruct {
       removalPolicy: isProd
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: !isProd,
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE,
+      // named by CloudFormation at deploy time, so it cannot be pre-created in
+      // a locked-down account.
+      autoDeleteObjects: !isProd && !loadPvtVpcConfig(this).privateVpcMode,
     });
   }
 }

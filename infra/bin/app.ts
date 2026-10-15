@@ -287,6 +287,7 @@ async function deploy(): Promise<void> {
     ...(apiWebAclId && { webAclId: apiWebAclId }),
     alarmAction,
     vpc: network.vpc,
+    lambdaSecurityGroup: network.lambdaSecurityGroup,
     rolesTable: authnz.rolesTable,
     resourceRoleMappingsTable: authnz.resourceRoleMappingsTable,
     cacheInvalidationTable: authnz.cacheInvalidationTable,

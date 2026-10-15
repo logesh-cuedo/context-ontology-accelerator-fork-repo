@@ -8,6 +8,8 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as path from "path";
 import { Construct } from "constructs";
+
+import { PvtVpcRoles } from "../pvt-vpc-roles";
 import { createHash } from "node:crypto";
 import { SCLConstruct } from "./scl-construct";
 import { InitialCognitoUserAttributes } from "../types";
@@ -39,8 +41,13 @@ export class UserPoolUser extends SCLConstruct {
   constructor(scope: Construct, id: string, props: UserPoolUserProps) {
     super(scope, id);
 
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
+
     const fn = new lambdaNodejs.NodejsFunction(this, "Lambda", {
       functionName: this.prefixed("admin-user-cr"),
+      role: roles.forService("adminUserLambda", "lambda"),
       entry: path.join(__dirname, "../lambdas/admin-user-handler.ts"),
       handler: "handler",
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -55,8 +62,13 @@ export class UserPoolUser extends SCLConstruct {
       "cognito-idp:CreateGroup",
       "cognito-idp:DeleteGroup",
     );
-
     const provider = new cr.Provider(this, "Provider", {
+      // The framework Lambda needs its own role; cr.Provider creates one
+      // CloudFormation names at deploy time otherwise.
+      frameworkOnEventRole: roles.forService(
+        "adminUserProviderFramework",
+        "lambda",
+      ),
       onEventHandler: fn,
     });
 

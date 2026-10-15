@@ -306,8 +306,13 @@ describe("NamespaceDeletionPipeline GraphRAG index teardown", () => {
     // Least privilege: no write/create on this policy.
     expect(policyStr).not.toContain("aoss:CreateIndex");
     expect(policyStr).not.toContain("aoss:WriteDocument");
-    // Scoped to the DeleteSources Lambda's own role, not account-wide.
-    expect(policyStr).toContain("DeleteSourcesFnServiceRole");
+    // Scoped to the DeleteSources Lambda's own role, not account-wide. Matched
+    // on "DeleteSourcesFnRole" rather than CDK's old implicit
+    // "DeleteSourcesFnServiceRole": the role is now created explicitly so it
+    // can carry a pre-createable name in a locked-down account.
+    expect(policyStr).toContain("DeleteSourcesFnRole");
+    // And it is still ONE principal — the step's own role, not a shared one.
+    expect(policyStr).not.toContain("root");
   });
 
   test("omitting the collection name skips the policy entirely", () => {

@@ -10,6 +10,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { Construct } from "constructs";
 import { resolveContext } from "../../context";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
 import { parseEcrImageUri } from "../../utils/ecr-utils";
@@ -49,6 +50,10 @@ export class McpStack extends SCLStack {
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
     const { ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
 
     const runtimeName = this.prefixed("mcp-server").replace(/-/g, "_");
 
@@ -134,6 +139,7 @@ export class McpStack extends SCLStack {
     // ── AgentCore Runtime (MCP protocol) ──────────────────────────────
     const runtime = new bedrockagentcore.Runtime(this, "McpRuntime", {
       runtimeName,
+      executionRole: roles.forService("mcpRuntimeExec", "bedrockAgentcore"),
       agentRuntimeArtifact:
         bedrockagentcore.AgentRuntimeArtifact.fromImageUri(imageUri),
       protocolConfiguration: bedrockagentcore.ProtocolType.MCP,

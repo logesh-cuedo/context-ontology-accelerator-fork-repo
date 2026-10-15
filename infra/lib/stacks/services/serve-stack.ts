@@ -13,6 +13,7 @@ import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { Construct } from "constructs";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
 import { resolveContext, namespaceTagKey } from "../../context";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
 import { parseEcrImageUri } from "../../utils/ecr-utils";
@@ -126,6 +127,10 @@ export class ServeStack extends SCLStack {
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
     const { prefix, ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
 
     // ── Resolve OpenSearch config via SSM (decoupled from storage stack exports) ──
     const opensearchEndpoint = ssm.StringParameter.valueForStringParameter(
@@ -315,6 +320,7 @@ export class ServeStack extends SCLStack {
 
     const aossProxyFn = new lambda.Function(this, "AossSearchProxyFn", {
       functionName: this.prefixed("aoss-search-proxy"),
+      role: roles.forService("aossSearchProxyFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "index.handler",
@@ -436,12 +442,17 @@ export class ServeStack extends SCLStack {
       // ── AgentCore Memory — conversation session state ───────────────
       const memory = new bedrockagentcore.Memory(this, "SessionMemory", {
         memoryName: runtimeName + "_memory",
+        executionRole: roles.forService("sessionMemory", "bedrockAgentcore"),
         description: "Conversation history for Playground multi-turn sessions",
         expirationDuration: cdk.Duration.days(30),
       });
 
       const runtime = new bedrockagentcore.Runtime(this, "AgentCoreRuntime", {
         runtimeName,
+        executionRole: roles.forService(
+          "agentCoreRuntimeExec",
+          "bedrockAgentcore",
+        ),
         agentRuntimeArtifact:
           bedrockagentcore.AgentRuntimeArtifact.fromImageUri(imageUri),
         authorizerConfiguration:

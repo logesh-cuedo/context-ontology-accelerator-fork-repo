@@ -10,7 +10,8 @@
     "format": "prettier --write \"bin/**/*.ts\" \"lib/**/*.ts\"",
     "format:check": "prettier --check \"bin/**/*.ts\" \"lib/**/*.ts\"",
     "test": "jest --runInBand && uv run pytest test/lambdas -q",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "pvt-vpc:permissions": "tsx bin/pvt-vpc-permissions.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1038.0",

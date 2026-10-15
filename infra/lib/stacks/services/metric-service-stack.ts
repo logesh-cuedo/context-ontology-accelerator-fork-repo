@@ -23,6 +23,7 @@ import { Construct } from "constructs";
 import { SCLStack } from "../../constructs/scl-stack";
 import { AccessLogsBucket, SclMonitoring } from "../../constructs";
 import { Paths, fromRoot } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
 import { resolveContext } from "../../context";
 import {
@@ -69,6 +70,10 @@ export class MetricServiceStack extends SCLStack {
     super(scope, id, props);
 
     const { ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
     const eventBusName = props.eventBusName ?? DEFAULT_EVENT_BUS_NAME;
     const bedrockModelId = props.bedrockModelId ?? DEFAULT_BEDROCK_MODEL_ID;
 
@@ -132,7 +137,11 @@ export class MetricServiceStack extends SCLStack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE,
+      // named by CloudFormation at deploy time, so it cannot be pre-created in
+      // a locked-down account. Private mode leaves the bucket for the operator
+      // to empty; every other flow keeps the convenience.
+      autoDeleteObjects: !roles.privateVpcMode,
       cors: [
         {
           allowedOrigins: [props.allowedOrigin ?? "*"],
@@ -154,6 +163,7 @@ export class MetricServiceStack extends SCLStack {
     // ── Metric API Lambda ──────────────────────────────────────────
     this.metricApiFn = new lambda.Function(this, "MetricApiFn", {
       functionName: this.prefixed("metric-api"),
+      role: roles.forService("metricApiFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_metrics.api.metric_api_handler.handler",
       code: lambdaCode,
@@ -343,6 +353,7 @@ export class MetricServiceStack extends SCLStack {
     // ── Import Worker Lambda ───────────────────────────────────────
     const importWorkerFn = new lambda.Function(this, "ImportWorkerFn", {
       functionName: this.prefixed("metric-import-worker"),
+      role: roles.forService("importWorkerFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_metrics.api.import_worker.handler",
       code: lambdaCode,
@@ -389,6 +400,7 @@ export class MetricServiceStack extends SCLStack {
       "ImportDlqRecoveryFn",
       {
         functionName: this.prefixed("metric-import-dlq-recovery"),
+        role: roles.forService("importDlqRecoveryFn", "lambda"),
         runtime: lambda.Runtime.PYTHON_3_12,
         handler: "coa_metrics.api.import_dlq_handler.handler",
         code: lambdaCode,

@@ -16,6 +16,7 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { Paths, fromRoot } from "../../paths";
 import { resolveContext } from "../../context";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
 import { NamespaceDeletionPipeline } from "./namespace-deletion-pipeline";
 import { TABLE_NAMES } from "@coa/shared";
@@ -82,6 +83,10 @@ export class NamespaceStack extends SCLStack {
     this.addComponentTag("namespace");
 
     const { ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
     const allowedOrigin = props.allowedOrigin ?? "*";
 
     const PK = { name: "PK", type: dynamodb.AttributeType.STRING };
@@ -304,28 +309,39 @@ export class NamespaceStack extends SCLStack {
       },
     );
 
-    const executionRole = new iam.Role(this, "DomainExecutionRole", {
-      roleName: this.prefixed("smus-exec"),
-      assumedBy: new iam.ServicePrincipal("datazone.amazonaws.com"),
-      managedPolicies: [smusExecutionPolicy],
-    });
+    // Already carried an explicit name, so private mode imports it by the
+    // same name. Its trust policy and managed policy are pre-attached there.
+    const executionRole =
+      roles.importNamed("smus-exec", "DomainExecutionRole") ??
+      new iam.Role(this, "DomainExecutionRole", {
+        roleName: this.prefixed("smus-exec"),
+        assumedBy: new iam.ServicePrincipal("datazone.amazonaws.com"),
+        managedPolicies: [smusExecutionPolicy],
+      });
 
     // All 10 SMUS service principals with the 4 required STS actions,
     // scoped to the deploying account to prevent cross-account assumption.
-    executionRole.assumeRolePolicy!.addStatements(
-      new iam.PolicyStatement({
-        actions: [
-          "sts:AssumeRole",
-          "sts:TagSession",
-          "sts:SetContext",
-          "sts:SetSourceIdentity",
-        ],
-        principals: smusPrincipals.map((s) => new iam.ServicePrincipal(s)),
-        conditions: {
-          StringEquals: { "aws:SourceAccount": this.account },
-        },
-      }),
-    );
+    //
+    // `instanceof iam.Role` narrows to the CREATED role. An imported role is
+    // an IRole, which has no trust policy to edit — in private mode the trust
+    // policy is part of the role the operator pre-created, and this statement
+    // must be present there.
+    if (executionRole instanceof iam.Role) {
+      executionRole.assumeRolePolicy?.addStatements(
+        new iam.PolicyStatement({
+          actions: [
+            "sts:AssumeRole",
+            "sts:TagSession",
+            "sts:SetContext",
+            "sts:SetSourceIdentity",
+          ],
+          principals: smusPrincipals.map((s) => new iam.ServicePrincipal(s)),
+          conditions: {
+            StringEquals: { "aws:SourceAccount": this.account },
+          },
+        }),
+      );
+    }
 
     // ── SMUS domain (IAM auth — no singleSignOn property) ────────
     const domain = new datazone.CfnDomain(this, "SMUSDomain", {
@@ -365,37 +381,39 @@ export class NamespaceStack extends SCLStack {
     // IAM-permitted on the datazone:DeleteProject action — the deletion
     // pipeline's DeletePlatform step assumes this role for that reason
     // (see cleanup.delete_smu_project).
-    const dzProjectAccessRole = new iam.Role(this, "DzProjectAccessRole", {
-      roleName: this.prefixed("dz-project-access"),
-      assumedBy: new iam.AccountPrincipal(this.account),
-      description:
-        "Shared role for DataZone project access - assumed by service Lambdas",
-      inlinePolicies: {
-        DataZoneAccess: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              actions: [
-                "datazone:CreateAsset",
-                "datazone:CreateAssetRevision",
-                "datazone:CreateFormType",
-                "datazone:DeleteAsset",
-                "datazone:DeleteProject",
-                "datazone:GetAsset",
-                "datazone:GetFormType",
-                "datazone:GetProject",
-                "datazone:ListAssets",
-                "datazone:Search",
-                "datazone:SearchListings",
-              ],
-              resources: [
-                `arn:aws:datazone:${this.region}:${this.account}:domain/${domain.attrId}`,
-                `arn:aws:datazone:${this.region}:${this.account}:domain/${domain.attrId}/*`,
-              ],
-            }),
-          ],
-        }),
-      },
-    });
+    const dzProjectAccessRole =
+      roles.importNamed("dz-project-access", "DzProjectAccessRole") ??
+      new iam.Role(this, "DzProjectAccessRole", {
+        roleName: this.prefixed("dz-project-access"),
+        assumedBy: new iam.AccountPrincipal(this.account),
+        description:
+          "Shared role for DataZone project access - assumed by service Lambdas",
+        inlinePolicies: {
+          DataZoneAccess: new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                actions: [
+                  "datazone:CreateAsset",
+                  "datazone:CreateAssetRevision",
+                  "datazone:CreateFormType",
+                  "datazone:DeleteAsset",
+                  "datazone:DeleteProject",
+                  "datazone:GetAsset",
+                  "datazone:GetFormType",
+                  "datazone:GetProject",
+                  "datazone:ListAssets",
+                  "datazone:Search",
+                  "datazone:SearchListings",
+                ],
+                resources: [
+                  `arn:aws:datazone:${this.region}:${this.account}:domain/${domain.attrId}`,
+                  `arn:aws:datazone:${this.region}:${this.account}:domain/${domain.attrId}/*`,
+                ],
+              }),
+            ],
+          }),
+        },
+      });
 
     const dzProjectAccessUserProfile = new datazone.CfnUserProfile(
       this,
@@ -555,6 +573,7 @@ export class NamespaceStack extends SCLStack {
     // ── Custom Asset Type (no native CF resource — use Custom Resource) ──
     const assetTypeFn = new lambdaNodejs.NodejsFunction(this, "AssetTypeCrFn", {
       functionName: this.prefixed("asset-type-cr"),
+      role: roles.forService("assetTypeCrFn", "lambda"),
       entry: path.join(__dirname, "../../lambdas/asset-type-handler.ts"),
       handler: "handler",
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -615,6 +634,13 @@ export class NamespaceStack extends SCLStack {
 
     const assetTypeProvider = new cr.Provider(this, "AssetTypeProvider", {
       onEventHandler: assetTypeFn,
+      // The framework Lambda gets its own role. Without this, cr.Provider
+      // creates one CloudFormation names at deploy time, which cannot be
+      // pre-created in a locked-down account.
+      frameworkOnEventRole: roles.forService(
+        "assetTypeProviderFramework",
+        "lambda",
+      ),
     });
 
     const assetTypeCr = new cdk.CustomResource(this, "CoaRelationalTable", {
@@ -656,6 +682,7 @@ export class NamespaceStack extends SCLStack {
       "NamespaceApiFn",
       {
         functionName: this.prefixed("namespace-api"),
+        role: roles.forService("namespaceApiFn", "lambda", { inVpc: true }),
         runtime: lambda.Runtime.PYTHON_3_12,
         handler: "coa_control_plane.namespace.namespace_api_handler.handler",
         code: lambdaCode,
@@ -866,6 +893,7 @@ export class NamespaceStack extends SCLStack {
     // ── Roles API Lambda (list platform roles + list/get namespace roles) ──
     const rolesApiFn = new lambda.Function(this, "RolesApiFn", {
       functionName: this.prefixed("roles-api"),
+      role: roles.forService("rolesApiFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_control_plane.roles.namespace_roles_handler.handler",
       code: lambdaCode,
@@ -873,6 +901,10 @@ export class NamespaceStack extends SCLStack {
       memorySize: 256,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      // The shared Lambda security group, as the other functions in this
+      // stack already do. Without it CDK creates an automatic SG per function,
+      // which a locked-down account denies (ec2:CreateSecurityGroup).
+      securityGroups: [props.lambdaSecurityGroup],
       environment: {
         ROLES_TABLE: props.rolesTable.tableName,
         ALLOWED_ORIGIN: allowedOrigin,
@@ -882,6 +914,7 @@ export class NamespaceStack extends SCLStack {
 
     const platformRolesApiFn = new lambda.Function(this, "PlatformRolesApiFn", {
       functionName: this.prefixed("platform-roles-api"),
+      role: roles.forService("platformRolesApiFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_control_plane.roles.list_platform_roles_handler.handler",
       code: lambdaCode,
@@ -889,6 +922,10 @@ export class NamespaceStack extends SCLStack {
       memorySize: 256,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      // The shared Lambda security group, as the other functions in this
+      // stack already do. Without it CDK creates an automatic SG per function,
+      // which a locked-down account denies (ec2:CreateSecurityGroup).
+      securityGroups: [props.lambdaSecurityGroup],
       environment: {
         ROLES_TABLE: props.rolesTable.tableName,
         ALLOWED_ORIGIN: allowedOrigin,
@@ -902,6 +939,7 @@ export class NamespaceStack extends SCLStack {
     // ── Grants API Lambda (CRUD for grants) ──────────────────────────
     const grantsApiFn = new lambda.Function(this, "GrantsApiFn", {
       functionName: this.prefixed("grants-api"),
+      role: roles.forService("grantsApiFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_control_plane.grants.grants_handler.handler",
       code: lambdaCode,
@@ -909,6 +947,10 @@ export class NamespaceStack extends SCLStack {
       memorySize: 256,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      // The shared Lambda security group, as the other functions in this
+      // stack already do. Without it CDK creates an automatic SG per function,
+      // which a locked-down account denies (ec2:CreateSecurityGroup).
+      securityGroups: [props.lambdaSecurityGroup],
       environment: {
         ROLES_TABLE: props.rolesTable.tableName,
         RESOURCE_ROLE_MAPPINGS_TABLE: props.resourceRoleMappingsTable.tableName,
@@ -981,38 +1023,42 @@ export class NamespaceStack extends SCLStack {
     const adminPrincipalArns =
       parsedAdminArns.length > 0 ? parsedAdminArns : [defaultAdminArn];
 
-    const loginRole = new iam.Role(this, "DomainLoginRole", {
-      roleName: this.prefixed("smus-login"),
-      assumedBy: new iam.CompositePrincipal(
-        ...adminPrincipalArns.map((arn) => new iam.ArnPrincipal(arn)),
-      ),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName(
-          "SageMakerStudioAdminIAMConsolePolicy",
+    const loginRole =
+      roles.importNamed("smus-login", "DomainLoginRole") ??
+      new iam.Role(this, "DomainLoginRole", {
+        roleName: this.prefixed("smus-login"),
+        assumedBy: new iam.CompositePrincipal(
+          ...adminPrincipalArns.map((arn) => new iam.ArnPrincipal(arn)),
         ),
-      ],
-      inlinePolicies: {
-        PassExecutionRole: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              sid: "IAMPassRoleStatement",
-              actions: ["iam:PassRole"],
-              resources: [executionRole.roleArn],
-              conditions: {
-                StringEquals: {
-                  "iam:PassedToService": "datazone.amazonaws.com",
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName(
+            "SageMakerStudioAdminIAMConsolePolicy",
+          ),
+        ],
+        inlinePolicies: {
+          PassExecutionRole: new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: "IAMPassRoleStatement",
+                actions: ["iam:PassRole"],
+                resources: [executionRole.roleArn],
+                conditions: {
+                  StringEquals: {
+                    "iam:PassedToService": "datazone.amazonaws.com",
+                  },
                 },
-              },
-            }),
-          ],
-        }),
-      },
-    });
+              }),
+            ],
+          }),
+        },
+      });
 
     // Optional MFA enforcement on assume-role
     const requireMfa = this.node.tryGetContext("smus_require_mfa") === "true";
-    if (requireMfa) {
-      loginRole.assumeRolePolicy!.addStatements(
+    // Narrowed for the same reason as DomainExecutionRole above: in private
+    // mode the MFA condition belongs to the pre-created trust policy.
+    if (requireMfa && loginRole instanceof iam.Role) {
+      loginRole.assumeRolePolicy?.addStatements(
         new iam.PolicyStatement({
           sid: "DenyAssumeWithoutMFA",
           effect: iam.Effect.DENY,

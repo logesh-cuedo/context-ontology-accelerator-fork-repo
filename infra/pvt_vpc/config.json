@@ -1,0 +1,42 @@
+{
+  "_": "Private-VPC deployment. Fill this in, then:  cdk deploy -c vpc_id=vpc-xxxxxxxx",
+  "_1": "The VPC ID is NOT in this file - it goes on the command line. Deploying WITHOUT -c vpc_id= runs the original flow, which creates its own VPC, security groups, endpoints and IAM roles and ignores this file entirely.",
+  "_2": "Only values the build cannot derive are here. Container image URIs, the admin user, custom domains, certificates, alarm topics, WAF ids and JDBC peering are unchanged in both flows: -c context keys and SSM /{prefix}/config.",
+  "_3": "The other ~21 VPC endpoints (S3, DynamoDB, Bedrock, ECR, STS, ...) still have to EXIST in the VPC, but their ids are not listed here: private DNS makes them transparent, so no code reads them. See DEPLOYMENT-NOTES.md for what to pre-create.",
+
+  "account": "",
+  "region": "us-east-1",
+  "prefix": "coa",
+  "env": "dev",
+
+  "vpc": {
+    "cidr": "",
+    "availabilityZones": ["", ""],
+    "privateSubnetIds": ["", ""],
+    "privateRouteTableIds": ["", ""]
+  },
+
+  "securityGroups": {
+    "lambda": "",
+    "ecs": "",
+    "neptune": "",
+    "aossVpce": "",
+    "connector": "",
+    "discoveryOcsp": ""
+  },
+
+  "vpcEndpoints": {
+    "aossData": ""
+  },
+
+  "_4": "OPTIONAL, and read in BOTH flows. Resources you already run, to reuse instead of create. Leave a block entirely blank and the deployment creates its own, as it always has. Fill a block in and it creates none of those resources and uses yours.",
+
+  "existing": {
+    "_neptune": "Your own Neptune cluster. All three fields together, or all blank. clusterResourceId is 'cluster-ABCD1234...', NOT the cluster name - every IAM policy is built from it, and the name produces an ARN that matches nothing and denies at runtime. Get it with: aws neptune describe-db-clusters --db-cluster-identifier <name> --query 'DBClusters[0].DbClusterResourceId'",
+    "neptune": {
+      "clusterEndpoint": "",
+      "port": "8182",
+      "clusterResourceId": ""
+    }
+  }
+}

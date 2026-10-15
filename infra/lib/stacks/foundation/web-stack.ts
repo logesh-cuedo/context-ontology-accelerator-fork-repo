@@ -13,6 +13,7 @@ import { RuntimeConfig } from "@coa/shared";
 import { SCLStack } from "../../constructs/scl-stack";
 import { resolveContext } from "../../context";
 import { fromRoot } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { CustomDomainConfig } from "../../types";
 
 /**
@@ -136,6 +137,15 @@ export class WebStack extends SCLStack {
   constructor(scope: Construct, id: string, props: WebStackProps) {
     super(scope, id, props);
 
+    // One role for the singleton Lambda every AwsCustomResource in this stack
+    // shares. Standard mode creates it named; private-VPC mode imports the
+    // pre-created one. See lib/pvt-vpc-roles.ts.
+    const execRoles = new PvtVpcRoles(this);
+    const customResourceRole = execRoles.forService(
+      "webCustomResource",
+      "lambda",
+    );
+
     const { ssmPrefix } = resolveContext(this.node);
 
     // IdP issuer/client ID via SSM (avoids a cross-stack export on the auth
@@ -208,6 +218,7 @@ export class WebStack extends SCLStack {
         this,
         "ReadCloudFrontWebAcl",
         {
+          role: customResourceRole,
           installLatestAwsSdk: false,
           onUpdate: {
             service: "SSM",
@@ -216,14 +227,19 @@ export class WebStack extends SCLStack {
             region,
             physicalResourceId: cr.PhysicalResourceId.of(`cf-web-acl-${name}`),
           },
-          policy: cr.AwsCustomResourcePolicy.fromStatements([
-            new iam.PolicyStatement({
-              actions: ["ssm:GetParameter"],
-              resources: [
-                `arn:aws:ssm:${region}:${this.account}:parameter${name}`,
-              ],
-            }),
-          ]),
+          // Omitted in private mode: the pre-created role already carries
+          // these permissions, and an AWS::IAM::Policy would need
+          // iam:PutRolePolicy the account denies.
+          ...(execRoles.customResourcePolicy(
+            cr.AwsCustomResourcePolicy.fromStatements([
+              new iam.PolicyStatement({
+                actions: ["ssm:GetParameter"],
+                resources: [
+                  `arn:aws:ssm:${region}:${this.account}:parameter${name}`,
+                ],
+              }),
+            ]),
+          ) ?? {}),
         },
       );
       resolvedWebAclId = webAclReader.getResponseField("Parameter.Value");
@@ -278,6 +294,7 @@ export class WebStack extends SCLStack {
     //          OAuthScope.OPENID → "openid", etc.
     if (props.isCognitoMode) {
       new cr.AwsCustomResource(this, "UpdateCognitoCallbacks", {
+        role: customResourceRole,
         installLatestAwsSdk: false,
         onUpdate: {
           service: "CognitoIdentityServiceProvider",
@@ -314,14 +331,19 @@ export class WebStack extends SCLStack {
             `cognito-callbacks-${clientId}`,
           ),
         },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ["cognito-idp:UpdateUserPoolClient"],
-            resources: [
-              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`,
-            ],
-          }),
-        ]),
+        // Omitted in private mode: the pre-created role already carries
+        // these permissions, and an AWS::IAM::Policy would need
+        // iam:PutRolePolicy the account denies.
+        ...(execRoles.customResourcePolicy(
+          cr.AwsCustomResourcePolicy.fromStatements([
+            new iam.PolicyStatement({
+              actions: ["cognito-idp:UpdateUserPoolClient"],
+              resources: [
+                `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`,
+              ],
+            }),
+          ]),
+        ) ?? {}),
       });
     }
 
@@ -338,6 +360,7 @@ export class WebStack extends SCLStack {
 
       // Update 4XX gateway response
       new cr.AwsCustomResource(this, "UpdateApiCors4XX", {
+        role: customResourceRole,
         installLatestAwsSdk: false,
         onUpdate: {
           service: "APIGateway",
@@ -351,16 +374,26 @@ export class WebStack extends SCLStack {
             `api-cors-4xx-${props.apiRestApiId}`,
           ),
         },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ["apigateway:PUT", "apigateway:PATCH", "apigateway:POST"],
-            resources: [`${apiArn}/*`],
-          }),
-        ]),
+        // Omitted in private mode: the pre-created role already carries
+        // these permissions, and an AWS::IAM::Policy would need
+        // iam:PutRolePolicy the account denies.
+        ...(execRoles.customResourcePolicy(
+          cr.AwsCustomResourcePolicy.fromStatements([
+            new iam.PolicyStatement({
+              actions: [
+                "apigateway:PUT",
+                "apigateway:PATCH",
+                "apigateway:POST",
+              ],
+              resources: [`${apiArn}/*`],
+            }),
+          ]),
+        ) ?? {}),
       });
 
       // Update 5XX gateway response
       new cr.AwsCustomResource(this, "UpdateApiCors5XX", {
+        role: customResourceRole,
         installLatestAwsSdk: false,
         onUpdate: {
           service: "APIGateway",
@@ -374,16 +407,26 @@ export class WebStack extends SCLStack {
             `api-cors-5xx-${props.apiRestApiId}`,
           ),
         },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ["apigateway:PUT", "apigateway:PATCH", "apigateway:POST"],
-            resources: [`${apiArn}/*`],
-          }),
-        ]),
+        // Omitted in private mode: the pre-created role already carries
+        // these permissions, and an AWS::IAM::Policy would need
+        // iam:PutRolePolicy the account denies.
+        ...(execRoles.customResourcePolicy(
+          cr.AwsCustomResourcePolicy.fromStatements([
+            new iam.PolicyStatement({
+              actions: [
+                "apigateway:PUT",
+                "apigateway:PATCH",
+                "apigateway:POST",
+              ],
+              resources: [`${apiArn}/*`],
+            }),
+          ]),
+        ) ?? {}),
       });
 
       // Trigger API redeployment so the CORS changes take effect
       new cr.AwsCustomResource(this, "RedeployApi", {
+        role: customResourceRole,
         installLatestAwsSdk: false,
         onUpdate: {
           service: "APIGateway",
@@ -397,12 +440,17 @@ export class WebStack extends SCLStack {
             `api-redeploy-${Date.now()}`,
           ),
         },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            actions: ["apigateway:POST"],
-            resources: [`${apiArn}/*`],
-          }),
-        ]),
+        // Omitted in private mode: the pre-created role already carries
+        // these permissions, and an AWS::IAM::Policy would need
+        // iam:PutRolePolicy the account denies.
+        ...(execRoles.customResourcePolicy(
+          cr.AwsCustomResourcePolicy.fromStatements([
+            new iam.PolicyStatement({
+              actions: ["apigateway:POST"],
+              resources: [`${apiArn}/*`],
+            }),
+          ]),
+        ) ?? {}),
       });
     }
   }

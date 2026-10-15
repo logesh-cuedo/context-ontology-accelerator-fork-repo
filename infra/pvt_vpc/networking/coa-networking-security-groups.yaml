@@ -1,0 +1,402 @@
+# ============================================================================
+# Context Ontology Accelerator - networking 1 of 2: SECURITY GROUPS
+# ============================================================================
+#
+# EVERY security group lives in this file. The endpoints template (2 of 2)
+# creates none at all -- it takes the group id below as a parameter.
+#
+#   17 resources:  7 security groups + 6 ingress + 4 egress
+#
+#   - 6 application groups, whose ids go into pvt_vpc/config.json
+#   - 1 shared group for all 20 interface VPC endpoints
+#
+# APPLY THIS FIRST. The endpoints template needs
+# InterfaceEndpointSecurityGroupId from this stack's Outputs as a parameter.
+# Nothing is exported, so the two stacks stay independent: this one can still
+# be changed or deleted without CloudFormation blocking it.
+#
+# Apply:
+#   aws cloudformation deploy \
+#     --stack-name coa-networking-security-groups \
+#     --template-file coa-networking-security-groups.yaml \
+#     --parameter-overrides VpcId=vpc-... VpcCidr=10.0.0.0/16
+#
+# Then copy the Outputs into pvt_vpc/config.json under securityGroups.*, and
+# pass InterfaceEndpointSecurityGroupId to the endpoints template.
+# ============================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Context Ontology Accelerator - all security groups: the 6 application groups
+  feeding pvt_vpc/config.json securityGroups.*, plus the shared group the
+  interface VPC endpoints template takes as a parameter
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: coa
+    Description: Resource name prefix. Must match pvt_vpc/config.json
+  EnvName:
+    Type: String
+    Default: dev
+    Description: Environment name. Must match pvt_vpc/config.json
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The existing VPC created in stage 1
+  VpcCidr:
+    Type: String
+    Description: >-
+      The VPC CIDR, e.g. 10.0.0.0/16. Used only by the shared interface
+      endpoint group, which accepts 443 from anywhere inside the VPC. The six
+      application groups reference each other by group id instead.
+
+Resources:
+
+  # ==========================================================================
+  # Application security groups
+  #
+  # The six groups the deployment imports by id, each with its own rules
+  # immediately below it. Their ids go into pvt_vpc/config.json under
+  # securityGroups.*
+  # ==========================================================================
+
+  # ==========================================================================
+  # Neptune - graph database
+  #
+  # Inbound 8182 (Gremlin/SPARQL) from ECS and Lambda only. No egress rules
+  # at all: the database never initiates a connection.
+  # ==========================================================================
+  NeptuneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Neptune cluster security group
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-neptune-sg'
+      SecurityGroupEgress:
+      - IpProtocol: icmp
+        FromPort: 252
+        ToPort: 86
+        CidrIp: 255.255.255.255/32
+        Description: Disallow all traffic
+      # CloudFormation's idiom for "no egress at all". Omitting
+      # SecurityGroupEgress makes EC2 add the default allow-all rule instead,
+      # so this unreachable rule (ICMP to a broadcast address, with a port
+      # range that cannot match) is what replaces it. CDK emits the same thing.
+  NeptuneIngressFromEcs:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt NeptuneSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt EcsSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8182
+      ToPort: 8182
+      Description: Neptune Gremlin/SPARQL from ECS
+  NeptuneIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt NeptuneSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8182
+      ToPort: 8182
+      Description: Neptune Gremlin/SPARQL from Lambda
+
+  # ==========================================================================
+  # ECS - Fargate tasks (ontology engine, VKG)
+  #
+  # Egress to Neptune is a separate resource from Neptune's ingress rule:
+  # two security groups referencing each other in their own definitions
+  # would be a circular dependency CloudFormation cannot resolve.
+  # ==========================================================================
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: ECS Fargate tasks security group
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-ecs-sg'
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+        Description: HTTPS to AWS APIs
+  EcsEgressToNeptune:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt EcsSecurityGroup.GroupId
+      DestinationSecurityGroupId: !GetAtt NeptuneSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8182
+      ToPort: 8182
+      Description: Neptune Gremlin/SPARQL
+  EcsIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EcsSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8001
+      ToPort: 8001
+      Description: Ontology engine HTTP from Lambda
+
+  # ==========================================================================
+  # Lambda - all functions
+  #
+  # The widest group here: Lambdas reach Neptune, ECS, every VPC endpoint,
+  # and the source databases they scan (5432/3306/1433/5439/1521 inline
+  # below). Remove the database ports you do not use.
+  # ==========================================================================
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Lambda functions security group
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-lambda-sg'
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+        Description: HTTPS to AWS APIs
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        CidrIp: 0.0.0.0/0
+        Description: Source database 5432 (PostgreSQL)
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        CidrIp: 0.0.0.0/0
+        Description: Source database 3306 (MySQL)
+      - IpProtocol: tcp
+        FromPort: 1433
+        ToPort: 1433
+        CidrIp: 0.0.0.0/0
+        Description: Source database 1433 (SQL Server)
+      - IpProtocol: tcp
+        FromPort: 5439
+        ToPort: 5439
+        CidrIp: 0.0.0.0/0
+        Description: Source database 5439 (Redshift)
+      - IpProtocol: tcp
+        FromPort: 1521
+        ToPort: 1521
+        CidrIp: 0.0.0.0/0
+        Description: Source database 1521 (Oracle)
+  LambdaEgressToNeptune:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LambdaSecurityGroup.GroupId
+      DestinationSecurityGroupId: !GetAtt NeptuneSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8182
+      ToPort: 8182
+      Description: Neptune Gremlin/SPARQL
+  LambdaEgressToEcs:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LambdaSecurityGroup.GroupId
+      DestinationSecurityGroupId: !GetAtt EcsSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 8001
+      ToPort: 8001
+      Description: Ontology engine HTTP
+
+  # ==========================================================================
+  # OpenSearch Serverless - vector store
+  #
+  # Inbound 443 from ECS and Lambda only.
+  # ==========================================================================
+  AossSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: AOSS VPC endpoint - accept HTTPS from authorized components
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-aoss-vpce-sg'
+      SecurityGroupEgress:
+      - IpProtocol: icmp
+        FromPort: 252
+        ToPort: 86
+        CidrIp: 255.255.255.255/32
+        Description: Disallow all traffic
+      # CloudFormation's idiom for "no egress at all". Omitting
+      # SecurityGroupEgress makes EC2 add the default allow-all rule instead,
+      # so this unreachable rule (ICMP to a broadcast address, with a port
+      # range that cannot match) is what replaces it. CDK emits the same thing.
+  AossIngressFromEcs:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AossSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt EcsSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      Description: HTTPS from ECS to AOSS endpoint
+  AossIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AossSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      Description: HTTPS from Lambda to AOSS endpoint
+
+  # ==========================================================================
+  # Database connectors - Glue / Athena federation
+  #
+  # Self-referencing ingress AND egress is required by Glue: a connection
+  # places ENIs in this group and they must reach each other.
+  # ==========================================================================
+  ConnectorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Glue Connection / Athena connector - outbound to source databases
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-connector-sg'
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        CidrIp: 0.0.0.0/0
+        Description: Source database 5432 (PostgreSQL)
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        CidrIp: 0.0.0.0/0
+        Description: Source database 3306 (MySQL)
+      - IpProtocol: tcp
+        FromPort: 1433
+        ToPort: 1433
+        CidrIp: 0.0.0.0/0
+        Description: Source database 1433 (SQL Server)
+      - IpProtocol: tcp
+        FromPort: 5439
+        ToPort: 5439
+        CidrIp: 0.0.0.0/0
+        Description: Source database 5439 (Redshift)
+      - IpProtocol: tcp
+        FromPort: 1521
+        ToPort: 1521
+        CidrIp: 0.0.0.0/0
+        Description: Source database 1521 (Oracle)
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+        Description: Snowflake OCSP
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+        Description: 'HTTPS: Snowflake wire protocol + AWS APIs'
+  ConnectorSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt ConnectorSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt ConnectorSecurityGroup.GroupId
+      IpProtocol: '-1'
+      Description: Self-referencing rule required by Glue/Athena
+  ConnectorSelfEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt ConnectorSecurityGroup.GroupId
+      DestinationSecurityGroupId: !GetAtt ConnectorSecurityGroup.GroupId
+      IpProtocol: '-1'
+      Description: Self-referencing rule required by Glue/Athena
+
+  # ==========================================================================
+  # Snowflake OCSP - certificate revocation checks
+  #
+  # Outbound 80 only. Snowflake's driver checks certificate revocation over
+  # plain HTTP, which no VPC endpoint can serve.
+  # ==========================================================================
+  DiscoveryOcspSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Snowflake discovery OCSP egress security group
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-discovery-ocsp-sg'
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+        Description: Snowflake OCSP
+
+  # ==========================================================================
+  # Interface VPC endpoints - one shared group for all 20
+  #
+  # Not an application group: the deployment never imports this one. Its id is
+  # a PARAMETER of the endpoints template (2 of 2), which creates no security
+  # groups of its own.
+  #
+  # One group rather than twenty because all twenty would be identical -- every
+  # interface endpoint accepts 443 from inside the VPC and nothing else. The
+  # endpoint itself is what restricts the service reached; the group only
+  # decides who may open the TLS connection.
+  #
+  # To give one endpoint tighter rules, create a second group here, output it,
+  # and pass it to that endpoint instead.
+  # ==========================================================================
+  InterfaceEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Shared security group for all interface VPC endpoints
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref VpcCidr
+        Description: HTTPS from inside the VPC
+      # Stated explicitly to match what the standard flow creates. CDK emits
+      # this same allow-all rule on every endpoint group, and it is also
+      # CloudFormation's default when SecurityGroupEgress is omitted -- so
+      # this changes nothing, it just stops the two flows differing on paper.
+      SecurityGroupEgress:
+      - IpProtocol: '-1'
+        CidrIp: 0.0.0.0/0
+        Description: Allow all outbound traffic by default
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-sg'
+
+Outputs:
+  LambdaSecurityGroupId:
+    Value: !GetAtt LambdaSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.lambda
+  EcsSecurityGroupId:
+    Value: !GetAtt EcsSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.ecs
+  NeptuneSecurityGroupId:
+    Value: !GetAtt NeptuneSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.neptune
+  AossSecurityGroupId:
+    Value: !GetAtt AossSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.aossVpce
+  ConnectorSecurityGroupId:
+    Value: !GetAtt ConnectorSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.connector
+  DiscoveryOcspSecurityGroupId:
+    Value: !GetAtt DiscoveryOcspSecurityGroup.GroupId
+    Description: -> config.json  securityGroups.discoveryOcsp
+
+  InterfaceEndpointSecurityGroupId:
+    Value: !GetAtt InterfaceEndpointSecurityGroup.GroupId
+    Description: >-
+      NOT for config.json. Pass this as the InterfaceEndpointSecurityGroupId
+      parameter of coa-networking-vpc-endpoints.yaml (2 of 2)

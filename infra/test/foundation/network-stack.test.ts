@@ -1,12 +1,60 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { NetworkStack } from "../../lib/stacks/foundation/network-stack";
 
 // Env required for fromLookup tests
 const TEST_ENV = { account: "123456789012", region: "us-east-1" };
+
+/**
+ * `-c vpc_id=` selects a private-VPC deployment, where the VPC and everything
+ * in it was pre-created because the account denies the pipeline
+ * `ec2:CreateSecurityGroup` and `iam:CreateRole`. The config file supplies
+ * that VPC's details and is REQUIRED alongside the flag — importing a VPC
+ * while creating the security groups inside it is the duplicate-resource
+ * state the flow exists to prevent.
+ *
+ * Written once here and installed for the whole file, because every `vpc_id`
+ * test needs it.
+ */
+const PRIVATE_VPC_CONFIG = {
+  account: TEST_ENV.account,
+  region: TEST_ENV.region,
+  prefix: "coa",
+  env: "dev",
+  vpc: {
+    cidr: "10.0.0.0/16",
+    availabilityZones: ["us-east-1b", "us-east-1c"],
+    privateSubnetIds: ["subnet-0a", "subnet-0b"],
+    privateRouteTableIds: ["rtb-0a", "rtb-0b"],
+  },
+  securityGroups: {
+    lambda: "sg-01",
+    ecs: "sg-02",
+    neptune: "sg-03",
+    aossVpce: "sg-04",
+    connector: "sg-05",
+    discoveryOcsp: "sg-06",
+  },
+  vpcEndpoints: { aossData: "vpce-0aoss" },
+};
+
+beforeAll(() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "network-stack-test-"));
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, JSON.stringify(PRIVATE_VPC_CONFIG));
+  process.env.COA_PVT_VPC_CONFIG = file;
+});
+
+afterAll(() => {
+  delete process.env.COA_PVT_VPC_CONFIG;
+});
 
 function buildStack(context: Record<string, string> = {}): Template {
   const app = new cdk.App({ context });

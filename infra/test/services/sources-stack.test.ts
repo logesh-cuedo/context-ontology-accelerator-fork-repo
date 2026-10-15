@@ -3021,97 +3021,92 @@ describe("Athena catalog-name prefix budget", () => {
   // not start with a letter, and `safe_prefix` is `[a-z0-9]*`, so the 6-character
   // overhead applies only to a DIGIT-leading prefix. For a letter-leading one the
   // overhead is 3 and the whole digest survives to 22.
-  it("is silent at 22 sanitised characters when the prefix starts with a letter", () => {
-    // 19 + len("dev") = 22 → 41 - 3 - 22 = 16.
-    expect(
-      digestWarnings({ resource_prefix: "abcdefghijklmnopqrs", env: "dev" }),
-    ).toEqual([]);
+  // 22 and 23 sanitised used to be the silent/warn boundary for a letter-leading
+  // prefix. Both now exceed the role-name budget (17 sanitised) and fail synth
+  // instead, so the boundary is unobservable — pinned here as a throw so that
+  // shortening the longest role name makes these fail loudly rather than silently
+  // re-entering the truncation range.
+  it("cannot reach the letter-leading truncation boundary any more", () => {
+    expect(() =>
+      synth({ resource_prefix: "abcdefghijklmnopqrs", env: "dev" }),
+    ).toThrow(/must be at most 19 characters/);
+    expect(() =>
+      synth({ resource_prefix: "abcdefghijklmnopqrst", env: "dev" }),
+    ).toThrow(/must be at most 19 characters/);
   });
 
-  it("warns at 23 when the prefix starts with a letter", () => {
-    const warnings = digestWarnings({
-      resource_prefix: "abcdefghijklmnopqrst",
-      env: "dev",
-    });
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("15 of 16 characters survive");
-    expect(warnings[0]).toContain("starts with a letter");
-  });
-
-  // The digit-leading branch, where the second `ds_` really is prepended. Reachable:
-  // `safe_prefix` keeps digits, and S3 and IAM both accept a digit-leading name.
-  it("is silent at 19 but warns at 20 when the prefix starts with a digit", () => {
-    // 16 + len("dev") = 19 → 41 - 6 - 19 = 16.
-    expect(
-      digestWarnings({ resource_prefix: "9bcdefghijklmnop", env: "dev" }),
-    ).toEqual([]);
-
-    // 17 + len("dev") = 20 → 41 - 6 - 20 = 15.
-    const warnings = digestWarnings({
-      resource_prefix: "9bcdefghijklmnopq",
-      env: "dev",
-    });
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('"9bcdefghijklmnopqdev" is 20 characters');
-    expect(warnings[0]).toContain(
-      'starts with a digit, so build_catalog_name prepends a second "ds_"',
-    );
-    expect(warnings[0]).toContain(
-      "at most 19 keep the whole 16-character digest",
-    );
-    expect(warnings[0]).toContain("15 of 16 characters survive");
-    expect(warnings[0]).toContain("alias to one credential");
-    expect(warnings[0]).toContain(
-      'RESOURCE_PREFIX is "9bcdefghijklmnopq-dev-"',
-    );
+  // The digit-leading branch, where the second `ds_` really is prepended, used to
+  // warn from 20 sanitised. 19 is already past the role-name budget, so this branch
+  // is unobservable too. Its 16-character silent case remains reachable and is
+  // covered by the digit-leading case below.
+  it("cannot reach the digit-leading truncation boundary any more", () => {
+    expect(() =>
+      synth({ resource_prefix: "9bcdefghijklmnop", env: "dev" }),
+    ).toThrow(/must be at most 19 characters/);
+    expect(() =>
+      synth({ resource_prefix: "9bcdefghijklmnopq", env: "dev" }),
+    ).toThrow(/must be at most 19 characters/);
   });
 
   /**
-   * Why there is no hard-failure case to test: the collision-prone range cannot be
-   * reached. The longest prefixed name in this stack is a 35-character `iam.Role` and
-   * IAM caps a role name at 64, which bounds `len(prefix) + len(env)` at 27, so the
-   * digest keeps at least 8 characters even in the digit-leading branch. These cases
-   * pin that ceiling from both sides: shorten that role name and the last one starts
-   * passing, which is when this reasoning needs revisiting.
+   * Why the collision-prone range cannot be reached at all any more.
+   *
+   * The Athena digest only starts truncating at 20 sanitised characters
+   * (digit-leading) or 23 (letter-leading). But every execution role is now named
+   * `{prefix}-{env}-{name}` so it can be pre-created in a locked-down account, and the
+   * longest of those names — `federation-provisioner-lf-admin-on-event-role`, 45
+   * characters — against IAM's 64-character cap bounds `{prefix}-{env}-` at 19, i.e.
+   * `len(prefix) + len(env)` at 17. A deployment long enough to truncate the digest
+   * therefore cannot synthesise at all.
+   *
+   * The ceiling was 27 while roles took CloudFormation-generated names, which is why
+   * the two truncation cases below used to be reachable and now are not. Shorten that
+   * role name and they become reachable again, which is when this reasoning needs
+   * revisiting — see lib/pvt-vpc-roles.ts.
    */
-  it("keeps 11 digest characters at the longest deployable letter-leading prefix", () => {
-    // 24 + len("dev") = 27 sanitised, the maximum this stack's own names allow.
-    const warnings = digestWarnings({
-      resource_prefix: "a".repeat(24),
-      env: "dev",
-    });
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("11 of 16 characters survive");
+  it("is silent at the longest deployable prefix, letter-leading", () => {
+    // 14 + len("dev") = 17 sanitised, the maximum the role-name budget allows.
+    expect(
+      digestWarnings({ resource_prefix: "a".repeat(14), env: "dev" }),
+    ).toEqual([]);
   });
 
-  it("keeps 8 digest characters in the worst deployable case, digit-leading", () => {
-    const warnings = digestWarnings({
-      resource_prefix: `9${"a".repeat(23)}`,
-      env: "dev",
-    });
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("8 of 16 characters survive");
+  it("is silent at the longest deployable prefix, digit-leading", () => {
+    // Same 17, on the branch that pays the extra 3-character `ds_` overhead.
+    expect(
+      digestWarnings({ resource_prefix: `9${"a".repeat(13)}`, env: "dev" }),
+    ).toEqual([]);
   });
 
-  it("fails on IAM's role-name limit, not on this check, one character longer", () => {
-    // 28 sanitised would keep only 10 (letter-leading) or 7 (digit-leading) digest
-    // characters — but the deployment cannot synthesise at all, and the error names the
-    // role rather than the prefix budget. This is also why `mycompany-analytics` +
-    // `production` (28) was never a deployment this check could have bricked.
+  it("fails on the role-name budget, one character longer", () => {
+    // 18 sanitised cannot synthesise. The error names the role-name budget and the
+    // longest role rather than the Athena digest, because that is the constraint an
+    // operator has to act on — and it fires before the digest could ever truncate.
     expect(() =>
-      synth({ resource_prefix: "a".repeat(25), env: "dev" }),
-    ).toThrow(/Invalid roleName/);
+      synth({ resource_prefix: "a".repeat(15), env: "dev" }),
+    ).toThrow(/longest role name.*must be at most 19 characters/s);
   });
 
   it("counts the sanitised length, not the raw prefix", () => {
-    // `[^a-z0-9]` goes before the budget applies, exactly as `build_catalog_name`
-    // does. RESOURCE_PREFIX here is `a-b-c-d-e-f-g-h-i-j-prod-`, 25 raw characters
-    // but only 14 sanitised — so a check written against the raw string would warn
-    // about a prefix that is entirely fine. (Case folding is not exercised: an
-    // uppercase prefix never reaches this check, because S3 rejects the bucket name
-    // first.)
+    // `[^a-z0-9]` goes before the Athena budget applies, exactly as
+    // `build_catalog_name` does: `a-b-c-d-e` is 9 raw characters but only 5
+    // sanitised, so a check written against the raw string would warn about a prefix
+    // that is entirely fine. (Case folding is not exercised: an uppercase prefix
+    // never reaches this check, because S3 rejects the bucket name first.)
     expect(
-      digestWarnings({ resource_prefix: "a-b-c-d-e-f-g-h-i-j", env: "prod" }),
+      digestWarnings({ resource_prefix: "a-b-c-d-e", env: "prod" }),
     ).toEqual([]);
+  });
+
+  it("counts the RAW prefix for the role-name budget, dashes included", () => {
+    // The two budgets read the prefix differently, and this is the case that shows
+    // it. `a-b-c-d-e-f-g-h-i-j` + `prod` is 14 SANITISED characters — comfortably
+    // inside the Athena digest budget, and silent there before this change — but an
+    // IAM role name keeps the dashes, so `{prefix}-{env}-` is 25 characters and the
+    // longest role would be 70. A prefix can therefore be fine for Athena and still
+    // undeployable.
+    expect(() =>
+      synth({ resource_prefix: "a-b-c-d-e-f-g-h-i-j", env: "prod" }),
+    ).toThrow(/is 25 characters.*must be at most 19 characters/s);
   });
 });

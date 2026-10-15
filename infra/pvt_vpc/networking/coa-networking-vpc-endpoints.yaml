@@ -1,0 +1,578 @@
+# ============================================================================
+# Context Ontology Accelerator - networking 2 of 2: VPC ENDPOINTS
+# ============================================================================
+#
+# The 22 VPC endpoints that keep all AWS traffic inside the VPC.
+#
+#   22 resources:  2 gateway + 20 interface endpoints
+#
+# NO SECURITY GROUPS. Every group lives in the security-groups template
+# (1 of 2). The 20 interface endpoints take their group id as the
+# InterfaceEndpointSecurityGroupId parameter below.
+#
+# APPLY THE SECURITY GROUPS TEMPLATE FIRST and copy its
+# InterfaceEndpointSecurityGroupId output into the parameter. It is passed by
+# value, not imported, so the two stacks stay independent -- deleting or
+# changing either is never blocked by the other.
+#
+# Apply:
+#   aws cloudformation deploy \
+#     --stack-name coa-networking-vpc-endpoints \
+#     --template-file coa-networking-vpc-endpoints.yaml \
+#     --parameter-overrides VpcId=vpc-... PrivateSubnetIds=subnet-a,subnet-b \
+#                           PrivateRouteTableIds=rtb-a,rtb-b \
+#                           InterfaceEndpointSecurityGroupId=sg-...
+#
+# No VpcCidr parameter: the only thing that needed it was the endpoint security
+# groups, which now live in template 1 of 2.
+#
+# Of the 22 endpoint ids, only AossDataVpcEndpointId goes into
+# pvt_vpc/config.json. The other 21 must exist, but private DNS makes them
+# transparent, so no code references their ids.
+# ============================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Context Ontology Accelerator - the 22 VPC endpoints. Creates no security
+  groups; takes the shared endpoint group id as a parameter.
+  AossDataVpcEndpointId feeds pvt_vpc/config.json vpcEndpoints.aossData
+
+Parameters:
+  # Prefix/EnvName/ProjectTag exist only for the tags below. A VPC endpoint
+  # carries no name of its own -- it is identified by service name.
+  Prefix:
+    Type: String
+    Default: coa
+    Description: Resource name prefix. Must match pvt_vpc/config.json
+  EnvName:
+    Type: String
+    Default: dev
+    Description: Environment name. Must match pvt_vpc/config.json
+  ProjectTag:
+    Type: String
+    Default: semantic-context
+    Description: >-
+      Value of the Project tag. The deployment applies this stack-wide in the
+      standard flow; matching it here keeps cost allocation consistent.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The existing VPC created in stage 1
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The two private subnets created in stage 1
+  PrivateRouteTableIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Route table ids of those private subnets, for the S3 and DynamoDB gateway
+      endpoints
+  InterfaceEndpointSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >-
+      The InterfaceEndpointSecurityGroupId output of
+      coa-networking-security-groups.yaml (1 of 2). Shared by all 20 interface
+      endpoints. This template creates no security groups of its own.
+
+Resources:
+
+  # ==========================================================================
+  # Gateway endpoints
+  #
+  # Route-table entries, not ENIs: no security group and no hourly cost.
+  # This is why PrivateRouteTableIds is a parameter.
+  # ==========================================================================
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: !Ref PrivateRouteTableIds
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-s3'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcEndpointType: Gateway
+      RouteTableIds: !Ref PrivateRouteTableIds
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-dynamodb'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # ==========================================================================
+  # Interface endpoints
+  #
+  # One ENI per subnet per service, all sharing the security group passed in as
+  # InterfaceEndpointSecurityGroupId. PrivateDnsEnabled makes them
+  # transparent: the AWS SDK resolves the normal service hostname to the
+  # endpoint, which is why only AossDataEndpoint's id is ever configured.
+  # ==========================================================================
+
+  # Bedrock - model invocation
+  # --------------------------------------------------------------------------
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-bedrock-runtime'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Bedrock AgentCore - Context Manager and MCP runtimes
+  # --------------------------------------------------------------------------
+  BedrockAgentCoreEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-agentcore'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-bedrock-agentcore'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # CloudWatch Logs
+  # --------------------------------------------------------------------------
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-logs'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # ECR - container images
+  #
+  # TWO endpoints, both required. ecr.api is the control plane (authentication,
+  # image metadata); ecr.dkr is the data plane that transfers the layers.
+  # A missing dkr endpoint fails at image pull, not at deploy.
+  # --------------------------------------------------------------------------
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-ecr-api'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-ecr-dkr'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # SSM Parameter Store - cross-stack wiring
+  # --------------------------------------------------------------------------
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-ssm'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Secrets Manager - database credentials
+  # --------------------------------------------------------------------------
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-secretsmanager'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # OpenSearch Serverless DATA plane
+  #
+  # The one endpoint whose id the deployment needs: the collection's network
+  # policy names it in SourceVPCEs. Without it the vector store is unreachable,
+  # or in a dev account left publicly reachable.
+  # -> pvt_vpc/config.json  vpcEndpoints.aossData
+  # --------------------------------------------------------------------------
+  AossDataEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.aoss-data'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-aoss-data'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # OpenSearch Serverless CONTROL plane - collection management
+  # --------------------------------------------------------------------------
+  AossControlPlaneEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.aoss'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-aoss'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # STS - role assumption
+  # --------------------------------------------------------------------------
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-sts'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # EventBridge
+  # --------------------------------------------------------------------------
+  EventBridgeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.events'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-events'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # SQS
+  # --------------------------------------------------------------------------
+  SqsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sqs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-sqs'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Step Functions
+  # --------------------------------------------------------------------------
+  StepFunctionsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.states'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-states'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Athena - federated query
+  # --------------------------------------------------------------------------
+  AthenaEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.athena'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-athena'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Glue - catalog and connections
+  # --------------------------------------------------------------------------
+  GlueEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.glue'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-glue'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Lambda - cross-function invoke
+  # --------------------------------------------------------------------------
+  LambdaEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.lambda'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-lambda'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # ECS - task control
+  # --------------------------------------------------------------------------
+  EcsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-ecs'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # DataZone / SageMaker Unified Studio - catalog
+  # --------------------------------------------------------------------------
+  DataZoneEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.datazone'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-datazone'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+  # Neptune Analytics
+  #
+  # TWO endpoints: neptune-graph is the control plane, neptune-graph-data the
+  # query path.
+  # --------------------------------------------------------------------------
+  NeptuneGraphEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.neptune-graph'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-neptune-graph'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+  NeptuneGraphDataEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.neptune-graph-data'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+      - !Ref InterfaceEndpointSecurityGroupId
+      Tags:
+      - Key: Name
+        Value: !Sub '${Prefix}-${EnvName}-vpce-neptune-graph-data'
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: Environment
+        Value: !Ref EnvName
+      - Key: Component
+        Value: foundation
+
+Outputs:
+  AossDataVpcEndpointId:
+    Value: !Ref AossDataEndpoint
+    Description: >-
+      -> config.json  vpcEndpoints.aossData  (REQUIRED: the OpenSearch
+      collection's network policy is built from this, and the deployment fails
+      without it)

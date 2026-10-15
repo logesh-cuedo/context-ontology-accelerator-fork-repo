@@ -44,6 +44,8 @@ import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
 
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
+
 export interface NamespaceDeletionPipelineProps {
   /** Prefixed name helper from SCLStack. */
   readonly prefixed: (name: string) => string;
@@ -119,6 +121,12 @@ export class NamespaceDeletionPipeline extends Construct {
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
 
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. Each step gets its OWN role — they are
+    // deliberately not shared, so a step cannot reach another step's
+    // resources. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
+
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
       code: props.lambdaCode,
@@ -131,6 +139,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── DeleteSources ────────────────────────────────────────────────
     const deleteSourcesFn = new lambda.Function(this, "DeleteSourcesFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineDeleteSourcesFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-sources"),
       handler:
         "coa_control_plane.namespace.deletion_pipeline.delete_sources.handler",
@@ -198,6 +209,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── DeleteMetrics ────────────────────────────────────────────────
     const deleteMetricsFn = new lambda.Function(this, "DeleteMetricsFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineDeleteMetricsFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-metrics"),
       handler:
         "coa_control_plane.namespace.deletion_pipeline.delete_metrics.handler",
@@ -216,6 +230,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── DeleteOntology ───────────────────────────────────────────────
     const deleteOntologyFn = new lambda.Function(this, "DeleteOntologyFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineDeleteOntologyFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-ontology"),
       handler:
         "coa_control_plane.namespace.deletion_pipeline.delete_ontology.handler",
@@ -246,6 +263,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── DeletePlatform (VKG, Athena, DataZone, role mappings, roles) ──
     const deletePlatformFn = new lambda.Function(this, "DeletePlatformFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineDeletePlatformFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-platform"),
       handler:
         "coa_control_plane.namespace.deletion_pipeline.delete_platform.handler",
@@ -319,6 +339,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── Finalize (must-succeed: namespace record + name reservation) ─
     const finalizeFn = new lambda.Function(this, "FinalizeFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineFinalizeFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-finalize"),
       handler: "coa_control_plane.namespace.deletion_pipeline.finalize.handler",
       timeout: cdk.Duration.seconds(30),
@@ -334,6 +357,9 @@ export class NamespaceDeletionPipeline extends Construct {
     // ── MarkFailed (error path: status -> DELETE_FAILED) ─────────────
     const markFailedFn = new lambda.Function(this, "MarkFailedFn", {
       ...commonLambdaProps,
+      role: roles.forService("deletionPipelineMarkFailedFn", "lambda", {
+        inVpc: true,
+      }),
       functionName: props.prefixed("ns-deletion-mark-failed"),
       handler:
         "coa_control_plane.namespace.deletion_pipeline.mark_failed.handler",
@@ -436,6 +462,7 @@ export class NamespaceDeletionPipeline extends Construct {
 
     this.stateMachine = new sfn.StateMachine(this, "StateMachine", {
       stateMachineName: props.prefixed("namespace-deletion-pipeline"),
+      role: roles.forService("deletionPipelineStateMachine", "states"),
       definitionBody: sfn.DefinitionBody.fromChainable(definition),
       timeout: cdk.Duration.hours(1),
       tracingEnabled: true,

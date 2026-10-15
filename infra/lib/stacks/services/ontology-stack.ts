@@ -22,6 +22,7 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { SclMonitoring } from "../../constructs";
 import { Paths } from "../../paths";
 import { resolveContext } from "../../context";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
 import {
@@ -97,6 +98,10 @@ export class OntologyStack extends SCLStack {
       );
     }
     const { ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
     const vpc = props.network.vpc;
     const ecsSecurityGroup = props.network.ecsSecurityGroup;
 
@@ -202,6 +207,10 @@ export class OntologyStack extends SCLStack {
       family: this.prefixed("ontology-engine"),
       cpu,
       memoryLimitMiB,
+      // A task definition needs BOTH: executionRole pulls the image and writes
+      // logs, taskRole is the running container's own identity.
+      executionRole: roles.forService("ontologyTaskDefExec", "ecsTasks"),
+      taskRole: roles.forService("ontologyTaskDefTask", "ecsTasks"),
     });
 
     const logGroup = new logs.LogGroup(this, "OntologyLogGroup", {
@@ -1035,6 +1044,7 @@ export class OntologyStack extends SCLStack {
     // ================================================================
     const apiProxyFn = new lambda.Function(this, "ApiProxyFn", {
       functionName: this.prefixed("ontology-api-proxy"),
+      role: roles.forService("apiProxyFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_ontology.api_proxy_handler.handler",
       // Merges libs/common/src into the asset root so

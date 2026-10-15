@@ -3,6 +3,7 @@
 
 import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as cr from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import * as fs from "fs";
@@ -11,6 +12,7 @@ import * as path from "path";
 import { SCLStack } from "../../constructs/scl-stack";
 import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { Paths } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { ClaimMapping } from "../../types";
 import {
   PrincipalType,
@@ -56,6 +58,16 @@ export class AuthnzStack extends SCLStack {
 
   constructor(scope: Construct, id: string, props?: AuthnzStackProps) {
     super(scope, id, props);
+
+    // One role for the singleton Lambda every AwsCustomResource in this stack
+    // shares. Standard mode creates it named; private-VPC mode imports the
+    // pre-created one. Named `execRoles` because `roles` is the roles TABLE in
+    // this stack. See lib/pvt-vpc-roles.ts.
+    const execRoles = new PvtVpcRoles(this);
+    const customResourceRole = execRoles.forService(
+      "authnzCustomResource",
+      "lambda",
+    );
     this.addComponentTag("authnz");
 
     const PK = { name: "PK", type: dynamodb.AttributeType.STRING };
@@ -114,7 +126,7 @@ export class AuthnzStack extends SCLStack {
     this.cacheInvalidationTable = cache.table;
 
     // ── 5. Seed built-in roles ───────────────────────────────────────
-    this.seedBuiltInRoles(roles.table);
+    this.seedBuiltInRoles(roles.table, customResourceRole, execRoles);
 
     // ── 6. Seed group → role mappings from IdP claims ────────────────
     for (const mapping of props?.claimsMappings ?? []) {
@@ -124,6 +136,7 @@ export class AuthnzStack extends SCLStack {
         // construct/physical ids stay raw to avoid logical-id churn on upgrade.
         const groupKey = sanitizePrincipalKey(group);
         new cr.AwsCustomResource(this, `SeedGroupMapping-${group}-${roleId}`, {
+          role: customResourceRole,
           onUpdate: {
             service: "DynamoDB",
             action: "putItem",
@@ -155,9 +168,14 @@ export class AuthnzStack extends SCLStack {
               `seed-group-mapping-${group}-${roleId}`,
             ),
           },
-          policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-            resources: [rrm.table.tableArn],
-          }),
+          // Omitted in private mode: the pre-created role already carries
+          // these permissions, and emitting an AWS::IAM::Policy would need
+          // iam:PutRolePolicy the account denies.
+          ...(execRoles.customResourcePolicy(
+            cr.AwsCustomResourcePolicy.fromSdkCalls({
+              resources: [rrm.table.tableArn],
+            }),
+          ) ?? {}),
         });
       }
     }
@@ -168,7 +186,17 @@ export class AuthnzStack extends SCLStack {
    * Uses AwsCustomResource (SDK call) so roles are created/updated on
    * every deployment without a Lambda function.
    */
-  private seedBuiltInRoles(rolesTable: dynamodb.Table): void {
+  /**
+   * @param customResourceRole execution role for the singleton Lambda the
+   *   AwsCustomResource instances share. Passed in rather than built here so
+   *   the stack creates exactly one, and so private-VPC mode imports one
+   *   pre-created role instead of letting CDK name it at deploy time.
+   */
+  private seedBuiltInRoles(
+    rolesTable: dynamodb.Table,
+    customResourceRole: iam.IRole,
+    execRoles: PvtVpcRoles,
+  ): void {
     const seedDir = Paths.authorizationSeed;
 
     const builtInRoles: {
@@ -238,6 +266,7 @@ export class AuthnzStack extends SCLStack {
       const pk = role.scope === "GLOBAL" ? "GLOBAL" : "NAMESPACE_TEMPLATE";
 
       new cr.AwsCustomResource(this, `SeedRole-${role.roleId}`, {
+        role: customResourceRole,
         onCreate: {
           service: "DynamoDB",
           action: "putItem",
@@ -280,9 +309,13 @@ export class AuthnzStack extends SCLStack {
             `seed-role-${role.roleId}`,
           ),
         },
-        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-          resources: [rolesTable.tableArn],
-        }),
+        // Omitted in private mode, for the same reason as the group-mapping
+        // seeds above.
+        ...(execRoles.customResourcePolicy(
+          cr.AwsCustomResourcePolicy.fromSdkCalls({
+            resources: [rolesTable.tableArn],
+          }),
+        ) ?? {}),
       });
     }
   }

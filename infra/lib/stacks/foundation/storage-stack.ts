@@ -13,6 +13,7 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { AccessLogsBucket } from "../../constructs";
 import { VECTOR_COLLECTION_SUFFIX } from "../../constants";
 import { resolveContext } from "../../context";
+import { loadPvtVpcConfig, resolveExistingNeptune } from "../../pvt-vpc-config";
 import { NetworkStack } from "./network-stack";
 
 /**
@@ -67,6 +68,10 @@ export class StorageStack extends SCLStack {
 
   constructor(scope: Construct, id: string, props: StorageStackProps) {
     super(scope, id, props);
+
+    // Read once: both the OpenSearch network policy and the bucket
+    // autoDeleteObjects flags below branch on the deployment flow.
+    const pvtVpc = loadPvtVpcConfig(this);
     this.addComponentTag("foundation");
 
     const { network } = props;
@@ -84,56 +89,75 @@ export class StorageStack extends SCLStack {
     //  if longer point-in-time recovery is needed.
     // =====================================================================
 
-    // TODO: Consider adding custom resource to verify Neptune endpoint is connectable
-    // post-deploy for prod reliability.
-    const neptuneSubnetGroup = new neptune.CfnDBSubnetGroup(
-      this,
-      "NeptuneSubnetGroup",
-      {
-        dbSubnetGroupName: this.prefixed("neptune-subnet-group"),
-        dbSubnetGroupDescription:
-          "Private subnets for the SemanticContext Neptune cluster",
-        subnetIds: privateSubnets.subnetIds,
-      },
-    );
+    // An existing cluster the client already runs, named in
+    // `existing.neptune` of the private-VPC config. Applies in BOTH flows: a
+    // client can already operate a graph database whether or not they also
+    // pre-created the VPC. Blank config means create our own, as always.
+    const existingNeptune = resolveExistingNeptune(this);
+    if (existingNeptune) {
+      this.neptuneClusterEndpoint = existingNeptune.clusterEndpoint;
+      this.neptunePort = Number(existingNeptune.port);
+      // Same ARN shape as the created path below, from the configured resource
+      // id. `resolveExistingNeptune` has already rejected a cluster NAME here,
+      // which would produce a valid-looking ARN matching nothing.
+      this.neptuneClusterArn = this.formatArn({
+        service: "neptune-db",
+        resource: existingNeptune.clusterResourceId,
+        resourceName: "*",
+        arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+      });
+    } else {
+      // TODO: Consider adding custom resource to verify Neptune endpoint is connectable
+      // post-deploy for prod reliability.
+      const neptuneSubnetGroup = new neptune.CfnDBSubnetGroup(
+        this,
+        "NeptuneSubnetGroup",
+        {
+          dbSubnetGroupName: this.prefixed("neptune-subnet-group"),
+          dbSubnetGroupDescription:
+            "Private subnets for the SemanticContext Neptune cluster",
+          subnetIds: privateSubnets.subnetIds,
+        },
+      );
 
-    const neptuneCluster = new neptune.CfnDBCluster(this, "NeptuneCluster", {
-      dbClusterIdentifier: this.prefixed("neptune"),
-      engineVersion: "1.4.7.0",
-      dbSubnetGroupName: neptuneSubnetGroup.dbSubnetGroupName!,
-      vpcSecurityGroupIds: [network.neptuneSecurityGroup.securityGroupId],
-      iamAuthEnabled: true, // SigV4 auth - recommended for multi-component access
-      storageEncrypted: true,
-      deletionProtection: this.envName === "prod",
-      backupRetentionPeriod: 7,
-    });
-    neptuneCluster.addDependency(neptuneSubnetGroup);
-    neptuneCluster.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      const neptuneCluster = new neptune.CfnDBCluster(this, "NeptuneCluster", {
+        dbClusterIdentifier: this.prefixed("neptune"),
+        engineVersion: "1.4.7.0",
+        dbSubnetGroupName: neptuneSubnetGroup.dbSubnetGroupName!,
+        vpcSecurityGroupIds: [network.neptuneSecurityGroup.securityGroupId],
+        iamAuthEnabled: true, // SigV4 auth - recommended for multi-component access
+        storageEncrypted: true,
+        deletionProtection: this.envName === "prod",
+        backupRetentionPeriod: 7,
+      });
+      neptuneCluster.addDependency(neptuneSubnetGroup);
+      neptuneCluster.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
 
-    const neptuneInstance = new neptune.CfnDBInstance(
-      this,
-      "NeptunePrimaryInstance",
-      {
-        dbInstanceIdentifier: this.prefixed("neptune-primary"),
-        dbInstanceClass: "db.r8g.large",
-        dbClusterIdentifier: neptuneCluster.dbClusterIdentifier!,
-      },
-    );
-    neptuneInstance.addDependency(neptuneCluster);
-    neptuneInstance.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      const neptuneInstance = new neptune.CfnDBInstance(
+        this,
+        "NeptunePrimaryInstance",
+        {
+          dbInstanceIdentifier: this.prefixed("neptune-primary"),
+          dbInstanceClass: "db.r8g.large",
+          dbClusterIdentifier: neptuneCluster.dbClusterIdentifier!,
+        },
+      );
+      neptuneInstance.addDependency(neptuneCluster);
+      neptuneInstance.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
 
-    this.neptunePort = 8182;
-    this.neptuneClusterEndpoint = neptuneCluster.attrEndpoint;
+      this.neptunePort = 8182;
+      this.neptuneClusterEndpoint = neptuneCluster.attrEndpoint;
 
-    // Neptune IAM data-access ARN uses the cluster *resource* ID
-    // (e.g. cluster-ABCD1234...), NOT the cluster identifier.
-    // Format: arn:aws:neptune-db:{region}:{account}:{cluster-resource-id}/*
-    this.neptuneClusterArn = this.formatArn({
-      service: "neptune-db",
-      resource: neptuneCluster.attrClusterResourceId,
-      resourceName: "*",
-      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
-    });
+      // Neptune IAM data-access ARN uses the cluster *resource* ID
+      // (e.g. cluster-ABCD1234...), NOT the cluster identifier.
+      // Format: arn:aws:neptune-db:{region}:{account}:{cluster-resource-id}/*
+      this.neptuneClusterArn = this.formatArn({
+        service: "neptune-db",
+        resource: neptuneCluster.attrClusterResourceId,
+        resourceName: "*",
+        arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+      });
+    }
 
     // =====================================================================
     //  OpenSearch Serverless  (VECTORSEARCH collection)
@@ -179,6 +203,22 @@ export class StorageStack extends SCLStack {
     );
 
     // Network policy — VPC-only access via standard EC2 Interface Endpoint (NextGen)
+    //
+    // Asserted, not assumed. `SourceVPCEs` is what confines the collection to
+    // the VPC, and an empty entry here is not a synth error — it ships as
+    // `"SourceVPCEs": [undefined]`, a policy that grants nothing. In dev the
+    // `AllowFromPublic` rule below masks that and the vector store stays
+    // reachable but PUBLIC; in every other environment nothing can reach it.
+    // Either way the first symptom is at runtime, so fail here instead.
+    if (!network.aossVpcEndpointId) {
+      throw new Error(
+        "NetworkStack produced no AOSS data-plane VPC endpoint id, so the " +
+          "OpenSearch Serverless network policy cannot name it. In a " +
+          "private-VPC deployment set vpcEndpoints.aossData in " +
+          "infra/pvt_vpc/config.json to the pre-created " +
+          "com.amazonaws.<region>.aoss endpoint.",
+      );
+    }
     const networkRules = [
       {
         Rules: [
@@ -195,9 +235,21 @@ export class StorageStack extends SCLStack {
       },
     ];
 
-    // Dev only: allow public access for integration tests run from developer laptops and CICD pipeline.
-    // All other environments (tst, demo, prod) are VPC-only.
-    if (this.envName === "dev") {
+    // Dev only: allow public access for integration tests run from developer
+    // laptops and the CICD pipeline. All other environments (tst, demo, prod)
+    // are VPC-only.
+    //
+    // NEVER in a private-VPC deployment, whatever the env name. `env` there is
+    // routinely "dev" — it is part of every resource name — so keying on the
+    // env alone would hand a locked-down account a publicly reachable vector
+    // store. `AllowFromPublic` is ADDITIVE: it does not replace the
+    // SourceVPCEs rule above, it opens a second door beside it, so the policy
+    // would look correct while the collection was open to the internet.
+    //
+    // The reason the exemption exists also does not apply: a private-VPC
+    // deployment's whole premise is that nothing reaches the data plane from
+    // outside the VPC, so an integration test on a laptop cannot work anyway.
+    if (this.envName === "dev" && !pvtVpc.privateVpcMode) {
       networkRules.push({
         Rules: [
           {
@@ -345,7 +397,10 @@ export class StorageStack extends SCLStack {
         this.envName === "prod"
           ? cdk.RemovalPolicy.RETAIN
           : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: this.envName !== "prod",
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE, named
+      // by CloudFormation at deploy time, so it cannot be pre-created in a
+      // locked-down account. Private mode leaves the bucket for the operator.
+      autoDeleteObjects: this.envName !== "prod" && !pvtVpc.privateVpcMode,
     });
 
     this.athenaSpillBucket = new s3.Bucket(this, "AthenaSpillBucket", {
@@ -363,7 +418,10 @@ export class StorageStack extends SCLStack {
         this.envName === "prod"
           ? cdk.RemovalPolicy.RETAIN
           : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: this.envName !== "prod",
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE, named
+      // by CloudFormation at deploy time, so it cannot be pre-created in a
+      // locked-down account. Private mode leaves the bucket for the operator.
+      autoDeleteObjects: this.envName !== "prod" && !pvtVpc.privateVpcMode,
     });
 
     // Ontology artifacts bucket — accepted proposals (Turtle + R2RML), shared
@@ -411,7 +469,10 @@ export class StorageStack extends SCLStack {
           this.envName === "prod"
             ? cdk.RemovalPolicy.RETAIN
             : cdk.RemovalPolicy.DESTROY,
-        autoDeleteObjects: this.envName !== "prod",
+        // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE, named
+        // by CloudFormation at deploy time, so it cannot be pre-created in a
+        // locked-down account. Private mode leaves the bucket for the operator.
+        autoDeleteObjects: this.envName !== "prod" && !pvtVpc.privateVpcMode,
       },
     );
 

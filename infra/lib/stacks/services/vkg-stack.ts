@@ -23,6 +23,7 @@ import {
   resolveContext,
   resolveLambdaReservedConcurrency,
 } from "../../context";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { NetworkStack } from "../foundation/network-stack";
 
 export interface VkgStackProps extends cdk.StackProps {
@@ -88,6 +89,10 @@ export class VkgStack extends SCLStack {
     this.addComponentTag("vkg");
 
     const { prefix, envName, ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
     const resourcePrefix = `${prefix}-${envName}`;
     const vpc = props.network.vpc;
     const ecsSecurityGroup = props.network.ecsSecurityGroup;
@@ -126,6 +131,10 @@ export class VkgStack extends SCLStack {
       family: this.prefixed("vkg-service"),
       cpu,
       memoryLimitMiB,
+      // A task definition needs BOTH: executionRole pulls the image and writes
+      // logs, taskRole is the running container's own identity.
+      executionRole: roles.forService("vkgTaskDefExec", "ecsTasks"),
+      taskRole: roles.forService("vkgTaskDefTask", "ecsTasks"),
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.ARM64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
@@ -243,6 +252,7 @@ export class VkgStack extends SCLStack {
     const reservedConcurrency = resolveLambdaReservedConcurrency(this.node);
     const reloadFn = new lambda.Function(this, "VkgReloadFn", {
       functionName: this.prefixed("vkg-reload"),
+      role: roles.forService("vkgReloadFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       code: lambda.Code.fromAsset("lambda/vkg-reload"),
@@ -267,7 +277,15 @@ export class VkgStack extends SCLStack {
       },
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: reservedConcurrency,
-      logRetention: logs.RetentionDays.ONE_MONTH,
+      // An explicit LogGroup rather than `logRetention`, which provisions a
+      // singleton helper Lambda WITH ITS OWN ROLE to call PutRetentionPolicy
+      // — a role CloudFormation names at deploy time, so it cannot be
+      // pre-created in a locked-down account.
+      logGroup: new logs.LogGroup(this, "VkgReloadFnLogGroup", {
+        logGroupName: `/aws/lambda/${this.prefixed("vkg-reload")}`,
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [ecsSecurityGroup],

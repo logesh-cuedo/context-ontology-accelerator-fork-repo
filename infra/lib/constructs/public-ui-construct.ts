@@ -10,6 +10,7 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
 import { SCLConstruct } from "./scl-construct";
 import { AccessLogsBucket } from "./access-logs-bucket";
+import { PvtVpcRoles } from "../pvt-vpc-roles";
 import { RuntimeConfig, RUNTIME_CONFIG_FILENAME } from "@coa/shared";
 
 /**
@@ -204,6 +205,10 @@ export class PublicUIConstruct extends SCLConstruct {
   constructor(scope: Construct, id: string, props: PublicUIConstructProps) {
     super(scope, id);
 
+    // Standard mode creates this role with an explicit name; private-VPC mode
+    // imports the pre-created one. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
+
     // S3 bucket for static website assets — fully private, accessed only via CloudFront OAC
     const uiAccessLogs = new AccessLogsBucket(this, "UIAccessLogs", {
       nameSuffix: "ui-logs",
@@ -217,7 +222,10 @@ export class PublicUIConstruct extends SCLConstruct {
       enforceSSL: true,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE,
+      // named by CloudFormation at deploy time, so it cannot be pre-created in
+      // a locked-down account.
+      autoDeleteObjects: !roles.privateVpcMode,
     });
 
     // Security headers policy
@@ -339,6 +347,9 @@ export class PublicUIConstruct extends SCLConstruct {
 
     new s3deploy.BucketDeployment(this, "DeployWebsite", {
       sources,
+      // The uploader Lambda needs its own role; BucketDeployment creates one
+      // CloudFormation names at deploy time otherwise.
+      role: roles.forService("webBucketDeployment", "lambda"),
       destinationBucket: this.uiBucket,
       distribution: this.distribution,
       distributionPaths: ["/*"],

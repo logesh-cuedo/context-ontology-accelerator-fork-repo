@@ -36,6 +36,7 @@ import {
   resolveLambdaReservedConcurrency,
 } from "../../context";
 import { Paths, fromRoot } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
 import { NetworkStack } from "../foundation/network-stack";
@@ -96,6 +97,10 @@ export class SourcesStack extends SCLStack {
     this.addComponentTag("sources");
 
     const { ssmPrefix, envName } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
     // Parameter-Store home for the Databricks sub-type, split into two subtrees
     // with a different writer each. `sources/` holds one parameter per source, which
     // the shared connector resolves from the catalog name it was invoked under.
@@ -268,7 +273,10 @@ export class SourcesStack extends SCLStack {
         this.envName === "prod"
           ? cdk.RemovalPolicy.RETAIN
           : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: this.envName !== "prod",
+      // autoDeleteObjects provisions a custom resource WITH ITS OWN ROLE,
+      // named by CloudFormation at deploy time, so it cannot be pre-created in
+      // a locked-down account.
+      autoDeleteObjects: this.envName !== "prod" && !roles.privateVpcMode,
       cors: [
         {
           allowedOrigins: [allowedOrigin],
@@ -395,15 +403,17 @@ export class SourcesStack extends SCLStack {
     // Set as ROLE_ARN on each federated Glue connection and used by Lake
     // Formation to vend credentials for the managed (no-Lambda) connector.
     // Must be assumable by Glue and Lake Formation.
-    const federatedCatalogRole = new iam.Role(this, "FederatedCatalogRole", {
-      roleName: this.prefixed("federated-catalog-role"),
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal("glue.amazonaws.com"),
-        new iam.ServicePrincipal("lakeformation.amazonaws.com"),
-      ),
-    });
+    const federatedCatalogRole =
+      roles.importNamed("federated-catalog-role", "FederatedCatalogRole") ??
+      new iam.Role(this, "FederatedCatalogRole", {
+        roleName: this.prefixed("federated-catalog-role"),
+        assumedBy: new iam.CompositePrincipal(
+          new iam.ServicePrincipal("glue.amazonaws.com"),
+          new iam.ServicePrincipal("lakeformation.amazonaws.com"),
+        ),
+      });
     props.storage.athenaSpillBucket.grantReadWrite(federatedCatalogRole);
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["glue:GetConnection"],
         resources: [
@@ -413,7 +423,7 @@ export class SourcesStack extends SCLStack {
       }),
     );
     // glue:ManagedConnector does not support resource-level restrictions.
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "GlueManagedConnectorExecution",
         actions: ["glue:ManagedConnector"],
@@ -431,7 +441,7 @@ export class SourcesStack extends SCLStack {
     //     carry a tag we control, so they stay unconditioned here — access is
     //     gated by the secret's own resource policy, which the customer grants to
     //     this role (see cross-account docs).
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "ReadCredentialSecretInAccount",
         actions: ["secretsmanager:GetSecretValue"],
@@ -442,7 +452,7 @@ export class SourcesStack extends SCLStack {
         },
       }),
     );
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "ReadCredentialSecretCrossAccount",
         actions: ["secretsmanager:GetSecretValue"],
@@ -464,7 +474,7 @@ export class SourcesStack extends SCLStack {
     // explicit key-policy grant from the customer regardless. The
     // kms:ViaService condition confines this to Secrets-Manager-mediated
     // decrypts, so the role can't use it for any other KMS operation.
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "DecryptCredentialSecret",
         actions: ["kms:Decrypt"],
@@ -480,7 +490,7 @@ export class SourcesStack extends SCLStack {
     const connectorSgId = props.network.connectorSecurityGroup.securityGroupId;
     // ec2:Describe* actions do not support resource-level permissions and must
     // use "*" (AWS limitation); they are read-only and low risk.
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "Ec2NetworkDescribe",
         actions: [
@@ -529,7 +539,7 @@ export class SourcesStack extends SCLStack {
     // skip the pre-flight and keep succeeding even if the policy is narrowed
     // again — so a narrowing looks safe in a warm account and only breaks the
     // next environment built from scratch. Test any change here in a fresh VPC.
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "Ec2NetworkInterfaceManagement",
         actions: [
@@ -556,7 +566,7 @@ export class SourcesStack extends SCLStack {
     // grant to Glue — least-privilege: the role cannot hand ENI-attach permission
     // to an arbitrary service/account. Glue managed connections are the only
     // consumer, so scoping to glue.amazonaws.com preserves the verified flow.
-    federatedCatalogRole.addToPolicy(
+    federatedCatalogRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: "Ec2CreateNetworkInterfacePermissionForGlue",
         actions: ["ec2:CreateNetworkInterfacePermission"],
@@ -615,6 +625,7 @@ export class SourcesStack extends SCLStack {
 
     const dbConnectorFn = new lambda.Function(this, "DbConnectorFn", {
       functionName: this.prefixed("sources-db-connector"),
+      role: roles.forService("dbConnectorFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "coa_sources.database.pipeline.discovery_handler.handler",
@@ -881,6 +892,9 @@ export class SourcesStack extends SCLStack {
       "FederationProvisionerFn",
       {
         functionName: this.prefixed("sources-federation-provisioner"),
+        role: roles.forService("federationProvisionerFn", "lambda", {
+          inVpc: true,
+        }),
         runtime: lambda.Runtime.PYTHON_3_12,
         architecture: lambda.Architecture.ARM_64,
         handler: "coa_sources.database.pipeline.federation_handler.handler",
@@ -933,12 +947,16 @@ export class SourcesStack extends SCLStack {
     // grant the connector role). Read-only precheck; the catalog role grants no
     // mutating access.
     federatedCatalogRole.grantAssumeRole(fedFnRole);
-    federatedCatalogRole.assumeRolePolicy?.addStatements(
-      new iam.PolicyStatement({
-        actions: ["sts:AssumeRole"],
-        principals: [fedFnRole],
-      }),
-    );
+    // Narrowed to the CREATED role: an imported one has no trust policy to
+    // edit, because in private mode the trust is part of the pre-created role.
+    if (federatedCatalogRole instanceof iam.Role) {
+      federatedCatalogRole.assumeRolePolicy?.addStatements(
+        new iam.PolicyStatement({
+          actions: ["sts:AssumeRole"],
+          principals: [fedFnRole],
+        }),
+      );
+    }
 
     // Glue Connections — created per source (named {prefix}ds_*).
     fedFnRole.addToPrincipalPolicy(
@@ -1273,6 +1291,10 @@ export class SourcesStack extends SCLStack {
         family: this.prefixed("sources-db-enrichment-agent"),
         cpu: 2048,
         memoryLimitMiB: 8192,
+        // executionRole pulls the image and writes logs; taskRole is the
+        // running container's own identity.
+        executionRole: roles.forService("dbEnrichmentTaskDefExec", "ecsTasks"),
+        taskRole: roles.forService("dbEnrichmentTaskDefTask", "ecsTasks"),
       },
     );
 
@@ -1647,6 +1669,7 @@ export class SourcesStack extends SCLStack {
       "DbScanStateMachine",
       {
         stateMachineName: this.prefixed("sources-db-scan-pipeline"),
+        role: roles.forService("dbScanStateMachine", "states"),
         definitionBody: sfn.DefinitionBody.fromChainable(
           dbUpdateDiscovering
             // Discovery runs first and validates the connection (fail-fast on a
@@ -1682,6 +1705,7 @@ export class SourcesStack extends SCLStack {
     // redelivery.
     const dbScanReaperFn = new lambda.Function(this, "DbScanReaperFn", {
       functionName: this.prefixed("sources-db-scan-reaper"),
+      role: roles.forService("dbScanReaperFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "coa_sources.database.pipeline.reaper_handler.handler",
@@ -1735,6 +1759,7 @@ export class SourcesStack extends SCLStack {
 
     const dbTriggerFn = new lambda.Function(this, "DbScanTriggerFn", {
       functionName: this.prefixed("sources-db-scan-trigger"),
+      role: roles.forService("dbScanTriggerFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       code: lambda.Code.fromAsset(Paths.sourcesDatabaseTrigger),
@@ -1783,6 +1808,7 @@ export class SourcesStack extends SCLStack {
 
     const bulkReviewWorkerFn = new lambda.Function(this, "BulkReviewWorkerFn", {
       functionName: this.prefixed("sources-bulk-review-worker"),
+      role: roles.forService("bulkReviewWorkerFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "index.handler",
@@ -1891,6 +1917,9 @@ export class SourcesStack extends SCLStack {
       "SourceDeleteWorkerFn",
       {
         functionName: this.prefixed("sources-delete-worker"),
+        role: roles.forService("sourceDeleteWorkerFn", "lambda", {
+          inVpc: true,
+        }),
         runtime: lambda.Runtime.PYTHON_3_12,
         architecture: lambda.Architecture.ARM_64,
         // Points straight at the module — the cleanup logic is imported from
@@ -1974,6 +2003,9 @@ export class SourcesStack extends SCLStack {
       "SourcesPreProcessingFn",
       {
         functionName: this.prefixed("sources-doc-preprocessing"),
+        role: roles.forService("sourcesPreProcessingFn", "lambda", {
+          inVpc: true,
+        }),
         code: preprocessingCode,
         timeout: cdk.Duration.minutes(15),
         memorySize: 3008,
@@ -2099,6 +2131,13 @@ export class SourcesStack extends SCLStack {
         family: this.prefixed("sources-doc-kg-build"),
         cpu: 4096,
         memoryLimitMiB: 16384,
+        // executionRole pulls the image and writes logs; taskRole is the
+        // running container's own identity.
+        executionRole: roles.forService(
+          "sourcesKgBuildTaskDefExec",
+          "ecsTasks",
+        ),
+        taskRole: roles.forService("sourcesKgBuildTaskDefTask", "ecsTasks"),
       },
     );
 
@@ -2120,19 +2159,24 @@ export class SourcesStack extends SCLStack {
             platform: Platform.LINUX_AMD64,
           });
 
-    const batchInferenceRole = new iam.Role(this, "SourcesBatchInferenceRole", {
-      roleName: this.prefixed("sources-doc-bedrock-batch-inference"),
-      assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com", {
-        conditions: {
-          StringEquals: { "aws:SourceAccount": this.account },
-          ArnLike: {
-            "aws:SourceArn": `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
+    const batchInferenceRole =
+      roles.importNamed(
+        "sources-doc-bedrock-batch-inference",
+        "SourcesBatchInferenceRole",
+      ) ??
+      new iam.Role(this, "SourcesBatchInferenceRole", {
+        roleName: this.prefixed("sources-doc-bedrock-batch-inference"),
+        assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com", {
+          conditions: {
+            StringEquals: { "aws:SourceAccount": this.account },
+            ArnLike: {
+              "aws:SourceArn": `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
+            },
           },
-        },
-      }),
-    });
+        }),
+      });
     sourcesBucket.grantReadWrite(batchInferenceRole);
-    batchInferenceRole.addToPolicy(
+    batchInferenceRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],
         resources: [
@@ -2652,6 +2696,7 @@ export class SourcesStack extends SCLStack {
       "SourcesDocIngestionStateMachine",
       {
         stateMachineName: this.prefixed("sources-doc-ingestion-pipeline"),
+        role: roles.forService("sourcesDocIngestionStateMachine", "states"),
         definitionBody: sfn.DefinitionBody.fromChainable(
           docUpdateIngesting
             .next(preprocessTask)
@@ -2668,6 +2713,9 @@ export class SourcesStack extends SCLStack {
       "SourcesDocDeletionCleanupFn",
       {
         functionName: this.prefixed("sources-doc-deletion-cleanup"),
+        role: roles.forService("sourcesDocDeletionCleanupFn", "lambda", {
+          inVpc: true,
+        }),
         runtime: lambda.Runtime.PYTHON_3_12,
         architecture: lambda.Architecture.ARM_64,
         handler: "cleanup_handler.handler",
@@ -2800,6 +2848,7 @@ export class SourcesStack extends SCLStack {
       "SourcesDocDeletionStateMachine",
       {
         stateMachineName: this.prefixed("sources-doc-deletion-pipeline"),
+        role: roles.forService("sourcesDocDeletionStateMachine", "states"),
         definitionBody: sfn.DefinitionBody.fromChainable(
           docCleanupTask.next(docGraphCleanupTask).next(docDeleteDdbRecord),
         ),
@@ -2827,6 +2876,9 @@ export class SourcesStack extends SCLStack {
       "SourcesDocIngestionTriggerFn",
       {
         functionName: this.prefixed("sources-doc-ingestion-trigger"),
+        role: roles.forService("sourcesDocIngestionTriggerFn", "lambda", {
+          inVpc: true,
+        }),
         runtime: lambda.Runtime.PYTHON_3_12,
         architecture: lambda.Architecture.ARM_64,
         handler: "index.handler",
@@ -2871,6 +2923,12 @@ export class SourcesStack extends SCLStack {
     // ================================================================
     const sourcesApiFn = new lambda.Function(this, "SourcesApiFn", {
       functionName: this.prefixed("sources-api"),
+      // PINNED NAME. A Databricks source's credential-access role names this
+      // ARN by hand in its trust policy, so the name must not move — see the
+      // narrowing further down, which used an L1 escape hatch to pin it
+      // before. `inVpc` re-adds the two managed policies the L2 would
+      // otherwise attach only to a role it created itself.
+      role: roles.forService("sourcesApi", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "coa_sources.api.sources_handler.handler",
@@ -3158,17 +3216,29 @@ export class SourcesStack extends SCLStack {
     // rename or a stack delete/recreate would hand every customer in the fleet a stale principal at
     // once, and the only symptom is `AccessDenied` at the next source create.
     //
-    // L1 rather than a role of our own passed to `lambda.Function`: the L2 attaches
-    // AWSLambdaBasicExecutionRole and AWSLambdaVPCAccessExecutionRole only to the role it creates
-    // itself, so supplying one would silently drop both from a VPC-bound function.
+    // The name is now set where the role is CREATED, in the `role:` prop on SourcesApiFn above,
+    // rather than patched onto the L1 afterwards. The escape hatch existed because the L2 attaches
+    // AWSLambdaBasicExecutionRole and AWSLambdaVPCAccessExecutionRole only to a role it creates
+    // itself; `PvtVpcRoles.forService({ inVpc: true })` attaches both explicitly, so supplying the
+    // role no longer drops them.
+    //
+    // Asserted on the L1's RoleName rather than on `sourcesApiRole.roleName`: the latter is a
+    // CloudFormation token for a created role, so comparing it to a literal can only ever fail.
+    // In private mode the role is imported and there is no L1 to inspect — the name came from the
+    // config, and the operator owns it. This name is load-bearing for every Databricks customer,
+    // so a refactor that stops pinning it must fail the synth rather than surface as AccessDenied.
+    const expectedSourcesApiRoleName = this.prefixed("sources-api-role");
     const cfnSourcesApiRole = sourcesApiRole.node.defaultChild;
-    if (!(cfnSourcesApiRole instanceof iam.CfnRole)) {
-      throw new Error(
-        "SourcesApiFn's execution role was not created by this stack, so its name cannot be " +
-          "pinned — and a customer's trust policy names it. Pin it where the role is created.",
-      );
+    if (cfnSourcesApiRole instanceof iam.CfnRole) {
+      const pinnedName = this.resolve(cfnSourcesApiRole.roleName);
+      if (pinnedName !== expectedSourcesApiRoleName) {
+        throw new Error(
+          `SourcesApiFn's execution role is named "${String(pinnedName)}" but a customer's ` +
+            `datasource-access trust policy names "${expectedSourcesApiRoleName}". Restore the ` +
+            "pinned name in the `role:` prop on SourcesApiFn.",
+        );
+      }
     }
-    cfnSourcesApiRole.roleName = this.prefixed("sources-api-role");
 
     // ================================================================
     // UnexpectedConnectorParameterWrite — the only detection for a repoint
@@ -3410,12 +3480,14 @@ export class SourcesStack extends SCLStack {
       name: rescanScheduleGroupName,
     });
 
-    const rescanSchedulerRole = new iam.Role(this, "RescanSchedulerRole", {
-      roleName: this.prefixed("sources-rescan-scheduler"),
-      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
-      description:
-        "Assumed by EventBridge Scheduler to invoke the Sources API Lambda for recurring rescans.",
-    });
+    const rescanSchedulerRole =
+      roles.importNamed("sources-rescan-scheduler", "RescanSchedulerRole") ??
+      new iam.Role(this, "RescanSchedulerRole", {
+        roleName: this.prefixed("sources-rescan-scheduler"),
+        assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
+        description:
+          "Assumed by EventBridge Scheduler to invoke the Sources API Lambda for recurring rescans.",
+      });
     sourcesApiFn.grantInvoke(rescanSchedulerRole);
 
     // The API Lambda creates/updates/deletes the per-source schedules within
@@ -3506,6 +3578,7 @@ export class SourcesStack extends SCLStack {
 
     const glueEventRescanFn = new lambda.Function(this, "GlueEventRescanFn", {
       functionName: this.prefixed("sources-glue-event-rescan"),
+      role: roles.forService("glueEventRescanFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: "coa_sources.database.glue_event_rescan_handler.handler",

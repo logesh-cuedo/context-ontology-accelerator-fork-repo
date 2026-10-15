@@ -30,6 +30,7 @@ import {
   EXPENSIVE_API_OPERATIONS,
 } from "../../constants";
 import { Paths, fromRoot } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
 import {
   readOpenApiSpec,
@@ -82,6 +83,15 @@ export interface ApiStackProps extends cdk.StackProps {
 
   /** VPC for Lambda authorizer placement. */
   readonly vpc: ec2.IVpc;
+
+  /**
+   * Shared Lambda security group from NetworkStack.
+   *
+   * Required, not optional: omitting it makes CDK create an automatic security
+   * group per VPC-attached function, which a locked-down account denies
+   * (`ec2:CreateSecurityGroup`). Every other service stack already passes it.
+   */
+  readonly lambdaSecurityGroup: ec2.ISecurityGroup;
 
   /** JWKS URI (optional — auto-discovered from issuer if not set). */
   readonly jwksUri?: string;
@@ -142,6 +152,13 @@ export class ApiStack extends SCLStack {
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
 
+    // Execution roles. Standard mode creates them with explicit names;
+    // private-VPC mode imports the pre-created ones, because the account
+    // denies the pipeline `iam:CreateRole`. Passing `role:` explicitly is the
+    // only way to get a stable name — CDK's implicit role is named by
+    // CloudFormation at deploy time and so cannot be pre-created.
+    const roles = new PvtVpcRoles(this);
+
     // IdP issuer/client ID via SSM (avoids a cross-stack export on the auth
     // stack's UserPoolClient — see idp-authentication-stack.ts for the writer).
     const issuerUrl = ssm.StringParameter.valueForStringParameter(
@@ -173,6 +190,7 @@ export class ApiStack extends SCLStack {
     // ── Custom Lambda Authorizer ───────────────────────────────────
     const authorizerFn = new lambda.Function(this, "AuthorizerFn", {
       functionName: this.prefixed("authorizer"),
+      role: roles.forService("authorizerFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_control_plane.authorization.handler.handler",
       code: bundlePython({
@@ -183,6 +201,7 @@ export class ApiStack extends SCLStack {
       memorySize: 256,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSecurityGroup],
       environment: {
         JWKS_ISSUER: issuerUrl,
         ...(props.jwksUri && { JWKS_URI: props.jwksUri }),
@@ -217,6 +236,9 @@ export class ApiStack extends SCLStack {
       "CacheInvalidationFn",
       {
         functionName: this.prefixed("cache-invalidation"),
+        role: roles.forService("cacheInvalidationFn", "lambda", {
+          inVpc: true,
+        }),
         runtime: lambda.Runtime.PYTHON_3_12,
         handler: "coa_control_plane.authorization.stream_handler.handler",
         code: bundlePython({
@@ -229,7 +251,17 @@ export class ApiStack extends SCLStack {
         // over the VPC's gateway endpoint, no public egress needed.
         vpc: props.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        logRetention: logs.RetentionDays.ONE_MONTH,
+        securityGroups: [props.lambdaSecurityGroup],
+        // An explicit LogGroup rather than `logRetention`, which provisions a
+        // singleton helper Lambda WITH ITS OWN ROLE to call PutRetentionPolicy
+        // — a role CloudFormation names at deploy time, so it cannot be
+        // pre-created in a locked-down account. The log group gives the same
+        // one-month retention with no extra role and no custom resource.
+        logGroup: new logs.LogGroup(this, "CacheInvalidationFnLogGroup", {
+          logGroupName: `/aws/lambda/${this.prefixed("cache-invalidation")}`,
+          retention: logs.RetentionDays.ONE_MONTH,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
         environment: {
           CACHE_INVALIDATION_TABLE_NAME: props.cacheInvalidationTable.tableName,
         },
@@ -299,20 +331,30 @@ export class ApiStack extends SCLStack {
     });
 
     // ── IAM role for API Gateway to invoke the authorizer Lambda ───
-    const authorizerRole = new iam.Role(this, "AuthorizerRole", {
-      roleName: this.prefixed("apigw-authorizer-role"),
-      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
-      inlinePolicies: {
-        InvokeAuthorizer: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              actions: ["lambda:InvokeFunction"],
-              resources: [authorizerFn.functionArn],
+    // Already carried an explicit name, so private mode imports this one by
+    // the same name it has always had. Its inline policy is pre-attached by
+    // the operator there — see the permission manifest.
+    const authorizerRole = roles.privateVpcMode
+      ? iam.Role.fromRoleArn(
+          this,
+          "AuthorizerRole",
+          `arn:aws:iam::${account}:role/${this.prefixed("apigw-authorizer-role")}`,
+          { mutable: false },
+        )
+      : new iam.Role(this, "AuthorizerRole", {
+          roleName: this.prefixed("apigw-authorizer-role"),
+          assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+          inlinePolicies: {
+            InvokeAuthorizer: new iam.PolicyDocument({
+              statements: [
+                new iam.PolicyStatement({
+                  actions: ["lambda:InvokeFunction"],
+                  resources: [authorizerFn.functionArn],
+                }),
+              ],
             }),
-          ],
-        }),
-      },
-    });
+          },
+        });
 
     // ── Default stub for unmapped paths ─────────────────────────────
     // Placeholder Lambda that returns 501 for any Smithy-defined path
@@ -321,6 +363,7 @@ export class ApiStack extends SCLStack {
     // The authorizer still protects these routes (unless in unsecuredPaths).
     const stubFn = new lambda.Function(this, "NotImplementedFn", {
       functionName: this.prefixed("api-not-implemented"),
+      role: roles.forService("notImplementedFn", "lambda"),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       code: lambda.Code.fromInline(
@@ -534,7 +577,10 @@ export class ApiStack extends SCLStack {
       restApiName: this.prefixed("api"),
       description: "Context Ontology Accelerator REST API",
       apiDefinition: apigw.ApiDefinition.fromInline(spec),
-      cloudWatchRole: true,
+      // Private mode must not create this role, and SpecRestApi offers no way
+      // to supply one — the account-level CloudWatch role is set externally
+      // there, alongside the other pre-created roles.
+      cloudWatchRole: !roles.privateVpcMode,
       ...(apiCustomDomain && {
         disableExecuteApiEndpoint: true,
         domainName: {

@@ -18,6 +18,7 @@ import { Construct } from "constructs";
 import { SCLStack } from "../../constructs/scl-stack";
 import { resolveContext } from "../../context";
 import { fromRoot, Paths } from "../../paths";
+import { PvtVpcRoles } from "../../pvt-vpc-roles";
 import { bundlePython } from "../../utils/python-bundling";
 
 export interface DataLayerStackProps extends cdk.StackProps {
@@ -38,6 +39,10 @@ export class DataLayerStack extends SCLStack {
     super(scope, id, props);
 
     const { ssmPrefix } = resolveContext(this.node);
+
+    // Standard mode creates these roles with explicit names; private-VPC mode
+    // imports the pre-created ones. See lib/pvt-vpc-roles.ts.
+    const roles = new PvtVpcRoles(this);
 
     const runtimeArn = ssm.StringParameter.valueForStringParameter(
       this,
@@ -70,6 +75,7 @@ export class DataLayerStack extends SCLStack {
     // ── Data Layer API Lambda ──────────────────────────────────────
     this.apiFn = new lambda.Function(this, "DataLayerApiFn", {
       functionName: this.prefixed("data-layer-api"),
+      role: roles.forService("dataLayerApiFn", "lambda", { inVpc: true }),
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "coa_data_layer.handler.handler",
       code: lambdaCode,
