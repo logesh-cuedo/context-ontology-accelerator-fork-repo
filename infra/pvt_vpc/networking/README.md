@@ -82,6 +82,27 @@ aws cloudformation deploy \
       InterfaceEndpointSecurityGroupId=$SG
 ```
 
+### If the VPC already has an S3 gateway endpoint
+
+The VPC console wizard creates one when "VPC endpoints: S3 Gateway" is
+selected, and AWS refuses a **second** gateway endpoint for the same service
+on the same route table — this stack would fail. Either delete the existing
+one, or keep it and pass:
+
+```bash
+      CreateS3Endpoint=false
+```
+
+Nothing reads this endpoint's id: a gateway endpoint is a route-table entry,
+not something the deployment addresses, so an existing one works identically.
+`CreateDynamoDbEndpoint` does the same for DynamoDB. Check first with:
+
+```bash
+aws ec2 describe-vpc-endpoints \
+  --filters Name=vpc-id,Values=<vpc-id> Name=vpc-endpoint-type,Values=Gateway \
+  --query 'VpcEndpoints[].{Id:VpcEndpointId,Service:ServiceName}' --output table
+```
+
 ## These match what the deployment would create itself
 
 The settings in these templates are not a reduced subset. They were diffed

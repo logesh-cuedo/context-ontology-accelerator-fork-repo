@@ -66,12 +66,40 @@ Parameters:
     Description: >-
       Route table ids of those private subnets, for the S3 and DynamoDB gateway
       endpoints
+  CreateS3Endpoint:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Set to false when the VPC already has an S3 gateway endpoint on these
+      route tables -- the VPC console wizard creates one if "VPC endpoints:
+      S3 Gateway" was selected. AWS refuses a second one for the same service
+      on the same route table, and nothing reads this endpoint's id, so an
+      existing one works identically. Check with: aws ec2
+      describe-vpc-endpoints --filters Name=vpc-id,Values=<vpc> Name=service-name,Values=com.amazonaws.<region>.s3
+  CreateDynamoDbEndpoint:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      As CreateS3Endpoint, for DynamoDB. The console wizard does not offer
+      this one, so it is normally left true.
   InterfaceEndpointSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: >-
       The InterfaceEndpointSecurityGroupId output of
       coa-networking-security-groups.yaml (1 of 2). Shared by all 20 interface
       endpoints. This template creates no security groups of its own.
+
+Conditions:
+  # The VPC console wizard offers "VPC endpoints: S3 Gateway" and creates one
+  # on the private route tables. AWS rejects a SECOND gateway endpoint for the
+  # same service on the same route table, so this stack would fail against such
+  # a VPC. Nothing reads this endpoint's id -- it is a route-table entry, not
+  # something the deployment addresses -- so an existing one is as good as one
+  # created here.
+  ShouldCreateS3Endpoint: !Equals [!Ref CreateS3Endpoint, 'true']
+  ShouldCreateDynamoDbEndpoint: !Equals [!Ref CreateDynamoDbEndpoint, 'true']
 
 Resources:
 
@@ -83,6 +111,7 @@ Resources:
   # ==========================================================================
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateS3Endpoint
     Properties:
       VpcId: !Ref VpcId
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
@@ -99,6 +128,7 @@ Resources:
         Value: foundation
   DynamoDBEndpoint:
     Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateDynamoDbEndpoint
     Properties:
       VpcId: !Ref VpcId
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
