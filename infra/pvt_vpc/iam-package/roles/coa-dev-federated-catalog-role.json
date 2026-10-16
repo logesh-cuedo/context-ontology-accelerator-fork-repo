@@ -24,7 +24,7 @@
         "Action": "sts:AssumeRole",
         "Effect": "Allow",
         "Principal": {
-          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-*"
+          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-federation-provisioner-fn-role"
         }
       }
     ],

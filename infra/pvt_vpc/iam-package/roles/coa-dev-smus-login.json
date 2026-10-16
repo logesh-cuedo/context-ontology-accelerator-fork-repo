@@ -10,7 +10,7 @@
         "Action": "sts:AssumeRole",
         "Effect": "Allow",
         "Principal": {
-          "AWS": "arn:aws:iam::${AccountId}:role/Admin"
+          "AWS": "arn:aws:iam::${AccountId}:user/logesh"
         }
       }
     ],
@@ -30,7 +30,7 @@
           }
         },
         "Effect": "Allow",
-        "Resource": "${DomainExecutionRole3CEB155A.Arn}",
+        "Resource": "arn:aws:iam::${AccountId}:role/coa-dev-smus-exec",
         "Sid": "IAMPassRoleStatement"
       }
     ]

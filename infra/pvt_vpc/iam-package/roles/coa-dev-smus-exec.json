@@ -45,7 +45,7 @@
     "Version": "2012-10-17"
   },
   "managedPolicyArns": [
-    "arn:aws:iam::${AccountId}:policy/coa-dev-*"
+    "arn:aws:iam::${AccountId}:policy/coa-dev-smus-exec-policy"
   ],
   "inlinePolicy": {
     "Version": "2012-10-17",

@@ -36,8 +36,8 @@
         ],
         "Effect": "Allow",
         "Resource": [
-          "arn:aws:datazone:${Region}:${AccountId}:domain/${SMUSDomain.Id}",
-          "arn:aws:datazone:${Region}:${AccountId}:domain/${SMUSDomain.Id}/*"
+          "arn:aws:datazone:${Region}:${AccountId}:domain/*",
+          "arn:aws:datazone:${Region}:${AccountId}:domain/*/*"
         ]
       }
     ]

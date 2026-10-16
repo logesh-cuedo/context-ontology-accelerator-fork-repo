@@ -17,14 +17,10 @@
         "Action": "sts:AssumeRole",
         "Effect": "Allow",
         "Principal": {
-          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-*"
-        }
-      },
-      {
-        "Action": "sts:AssumeRole",
-        "Effect": "Allow",
-        "Principal": {
-          "AWS": "arn:aws:iam::${AccountId}:role/coa-dev-*"
+          "AWS": [
+            "arn:aws:iam::${AccountId}:role/coa-dev-sources-api-role",
+            "arn:aws:iam::${AccountId}:role/coa-dev-db-connector-fn-role"
+          ]
         }
       }
     ],

@@ -9,7 +9,7 @@
         }
       },
       "Effect": "Allow",
-      "Resource": "${DomainExecutionRole3CEB155A.Arn}",
+      "Resource": "arn:aws:iam::${AccountId}:role/coa-dev-smus-exec",
       "Sid": "IAMPassRoleStatement"
     }
   ]
