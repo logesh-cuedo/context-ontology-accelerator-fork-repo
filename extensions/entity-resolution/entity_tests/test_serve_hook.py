@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from coa_entity.resolver import CLARIFICATION_MARKER, EntityCandidate, EntityResolution
-from coa_entity.serve_hook import STEP_ID, EntityHook, build_entity_hook
+from coa_entity.serve_hook import STEP_ID, TIME_STEP_ID, EntityHook, build_entity_hook
 
 from .helpers import sample_document
 
@@ -81,6 +81,23 @@ class TestEntityHook:
         hook, _ = _hook(EntityResolution(status="no_entity"))
         out = await hook.before_tier2("top 10 by pat", "ns1", [0.1], TraceCollector(), None)
         assert "Entity filters" in out.sql_context
+
+    async def test_time_period_added_next_to_entities_with_its_own_step(self):
+        doc = sample_document() | {"time": {"column": "yyyymm", "fiscalYearEndMonth": 3}}
+        hook, _ = _hook(EntityResolution(status="no_entity"), config=doc)
+        trace = TraceCollector()
+        out = await hook.before_tier2("top 3 pharma companies by net sales in FY25", "ns1", [0.1], trace, None)
+        assert "## Entity filters" in out.sql_context
+        assert "FY25 (Apr 2024 – Mar 2025) → yyyymm BETWEEN 202404 AND 202503" in out.sql_context
+        step = next(s for s in trace.steps if s.step == TIME_STEP_ID)
+        assert step.detail["periods"] == ["FY25 (Apr 2024 – Mar 2025)"]
+
+    async def test_no_period_no_time_step(self):
+        doc = sample_document() | {"time": {"column": "yyyymm", "fiscalYearEndMonth": 3}}
+        hook, _ = _hook(EntityResolution(status="no_entity"), config=doc)
+        trace = TraceCollector()
+        await hook.before_tier2("top 3 pharma companies by net sales", "ns1", [0.1], trace, None)
+        assert all(s.step != TIME_STEP_ID for s in trace.steps)
 
     async def test_searches_the_active_version_with_its_name_list(self):
         hook, resolver = _hook(EntityResolution(status="no_entity"), pointer=POINTER)

@@ -425,6 +425,7 @@ class SQLGenerator:
         graph_expander: GraphExpander | None = None,
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
+        pinned_tables: list[str] | None = None,  # cuedo-ext: governed metric's tables
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -453,6 +454,8 @@ class SQLGenerator:
                 leaves the prompt byte-identical to the pre-change baseline.
             entities: cuedo-ext — entity-resolution prompt section
                 (extensions/entity-resolution). Empty → no section.
+            pinned_tables: cuedo-ext — a forwarded governed metric's tables, added to
+                the retrieved classes when similarity missed them.
         """
         trace: list[dict[str, Any]] = []
 
@@ -501,6 +504,10 @@ class SQLGenerator:
                 entity_type="class",
                 require_mapped=use_mapped_gate,
             )
+            if pinned_tables:  # cuedo-ext: a forwarded governed metric's table is always in context
+                hits = await _ext_pin_tables(
+                    hits, pinned_tables, self, namespace=namespace, index=index, require_mapped=use_mapped_gate
+                )
             retrieved_tables = _extract_table_names(hits)
             status = "ok" if retrieved_tables else "empty"
 
@@ -957,6 +964,15 @@ def _table_name_from_class_text(text: str) -> str:
         return text.split(" | ")[0].replace("Table: ", "").strip().lower()
     parts = text.split()
     return parts[0].lower() if parts else ""
+
+
+async def _ext_pin_tables(hits: list[VectorHit], tables: list[str], gen: SQLGenerator, **kw: Any) -> list[VectorHit]:
+    """cuedo-ext: add the governed metric's tables (extensions/entity-resolution); no-op without it."""
+    try:
+        from coa_entity.pinning import pin_tables
+    except ImportError:  # pragma: no cover - extension not installed
+        return hits
+    return await pin_tables(hits, tables, vector=gen._vector, llm=gen._llm, table_of=_table_name_from_class_text, **kw)
 
 
 def _extract_table_names(hits: list[VectorHit]) -> list[str]:

@@ -13,15 +13,18 @@
  */
 
 export const ENTITY_STEP_ID = "t2.entity.resolve";
+export const TIME_STEP_ID = "t2.time.resolve";
 
 /** Live (streaming) label. */
 export const ENTITY_STEP_LABELS: Record<string, string> = {
   [ENTITY_STEP_ID]: "Resolving entities",
+  [TIME_STEP_ID]: "Resolving time period",
 };
 
 /** Execution-plan label. */
 export const ENTITY_STEP_DISPLAY_NAMES: Record<string, string> = {
   [ENTITY_STEP_ID]: "Resolve entities",
+  [TIME_STEP_ID]: "Resolve time period",
 };
 
 /**
@@ -29,7 +32,7 @@ export const ENTITY_STEP_DISPLAY_NAMES: Record<string, string> = {
  * into NL→SQL / VKG subgroups they belong to neither, so they stay in the
  * section's lead-in — otherwise the split view would drop them.
  */
-export const ENTITY_LEAD_IN_STEP_IDS = new Set([ENTITY_STEP_ID]);
+export const ENTITY_LEAD_IN_STEP_IDS = new Set([ENTITY_STEP_ID, TIME_STEP_ID]);
 
 export const ENTITY_STEP_FALLBACK = "Entities resolved.";
 
@@ -68,3 +71,20 @@ export function formatEntityStep(d: Record<string, unknown>): string {
       return "";
   }
 }
+
+/** One-line summary of the time-period step's detail. */
+export function formatTimeStep(d: Record<string, unknown>): string {
+  const periods = Array.isArray(d.periods) ? (d.periods as unknown[]) : [];
+  return periods.length > 0
+    ? `Resolved ${periods.map(String).join("; ")}.`
+    : "No time period named.";
+}
+
+/** Formatters for every extension step, keyed by step id. */
+export const EXTENSION_STEP_FORMATTERS: Record<
+  string,
+  (d: Record<string, unknown>) => string
+> = {
+  [ENTITY_STEP_ID]: formatEntityStep,
+  [TIME_STEP_ID]: formatTimeStep,
+};

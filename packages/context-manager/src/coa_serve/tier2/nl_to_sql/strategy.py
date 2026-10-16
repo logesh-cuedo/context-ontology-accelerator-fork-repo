@@ -49,6 +49,17 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _ext_metric_tables(declined: DeclinedMetricContext | None, resolved_source_id: str) -> list[str]:
+    """cuedo-ext: tables of a forwarded governed metric, pinned into the schema context."""
+    if not _governed_metric_block(declined, resolved_source_id) or declined is None:
+        return []
+    try:
+        from coa_entity.pinning import metric_tables
+    except ImportError:  # pragma: no cover - extension not installed
+        return []
+    return metric_tables(declined.sql_template)
+
+
 def _governed_metric_block(declined: DeclinedMetricContext | None, resolved_source_id: str) -> str:
     """The governed-metric block to forward to the SQL writer, or ``""`` when it must not be.
 
@@ -364,6 +375,7 @@ class NLtoSQLStrategy:
             # non-declining path, keeping the prompt byte-identical to the baseline.
             governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
             entities=entities,
+            pinned_tables=_ext_metric_tables(context.declined_metric, data_source_id),  # cuedo-ext
         )
 
         t_ms = int((time.perf_counter() - t_start) * 1000)

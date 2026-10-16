@@ -4,7 +4,11 @@
 import { describe, it, expect } from "vitest";
 import { formatStepDetail } from "@components/Chat/RationalePanel/format-step-detail";
 import { STEP_DISPLAY_NAMES } from "@components/Chat/step-labels";
-import { ENTITY_STEP_ID, formatEntityStep } from "./entity-resolution";
+import {
+  ENTITY_STEP_ID,
+  TIME_STEP_ID,
+  formatEntityStep,
+} from "./entity-resolution";
 
 describe("entity-resolution extension", () => {
   it("lists any configured entity types", () => {
@@ -30,5 +34,14 @@ describe("entity-resolution extension", () => {
         entities: {},
       }),
     ).toBe("No specific entity named in the question.");
+  });
+
+  it("shows the resolved time period", () => {
+    expect(STEP_DISPLAY_NAMES[TIME_STEP_ID]).toBe("Resolve time period");
+    expect(
+      formatStepDetail(TIME_STEP_ID, {
+        periods: ["FY25 (Apr 2024 – Mar 2025)"],
+      }),
+    ).toBe("Resolved FY25 (Apr 2024 – Mar 2025).");
   });
 });

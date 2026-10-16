@@ -30,10 +30,12 @@ from .config import EntityConfig, EntityConfigError, load_config
 from .index_builder import index_name
 from .lexical import NameMatcher
 from .resolver import EntityResolver, fallback_rules, resolved_block, resume_clarification
+from .time_period import resolve_periods, time_block
 
 logger = structlog.get_logger(__name__)
 
 STEP_ID = "t2.entity.resolve"
+TIME_STEP_ID = "t2.time.resolve"
 _CONFIG_TTL_S = 300.0
 _POINTER_TTL_S = 60.0
 
@@ -123,25 +125,39 @@ class EntityHook:
         config = await self.config_for(namespace)
         if config is None:
             return Tier2Outcome()
-        start = time.perf_counter()
-        index, matcher = await self._locate(namespace)
-        resolution = await self._resolver.resolve(
-            query, namespace, config, index=index, matcher=matcher, embedding=embedding, model_id=model_id
-        )
-        trace.record(
-            STEP_ID,
-            "skipped" if resolution.status == "skipped" else "success",
-            int((time.perf_counter() - start) * 1000),
-            detail={
-                "status": resolution.status,
-                "entities": resolution.by_kind(),
-                **({"reason": resolution.reason} if resolution.reason else {}),
-            },
-            tool_used="opensearch",
-        )
-        if resolution.needs_clarification:
-            return Tier2Outcome(clarification=resolution.clarification)
-        return Tier2Outcome(sql_context=resolved_block(resolution, config) or fallback_rules(config))
+        sections: list[str] = []
+        if config.entity_types:
+            start = time.perf_counter()
+            index, matcher = await self._locate(namespace)
+            resolution = await self._resolver.resolve(
+                query, namespace, config, index=index, matcher=matcher, embedding=embedding, model_id=model_id
+            )
+            trace.record(
+                STEP_ID,
+                "skipped" if resolution.status == "skipped" else "success",
+                int((time.perf_counter() - start) * 1000),
+                detail={
+                    "status": resolution.status,
+                    "entities": resolution.by_kind(),
+                    **({"reason": resolution.reason} if resolution.reason else {}),
+                },
+                tool_used="opensearch",
+            )
+            if resolution.needs_clarification:
+                return Tier2Outcome(clarification=resolution.clarification)
+            sections.append(resolved_block(resolution, config) or fallback_rules(config))
+        if config.time is not None:
+            periods = resolve_periods(query, config.time)
+            if periods:
+                trace.record(
+                    TIME_STEP_ID,
+                    "success",
+                    0,
+                    detail={"periods": [p.label for p in periods], "conditions": [p.condition for p in periods]},
+                    tool_used="rules",
+                )
+                sections.append(time_block(periods, config.time))
+        return Tier2Outcome(sql_context="\n\n".join(s for s in sections if s))
 
     @staticmethod
     def clarification_response(text: str, trace: Any, metadata: dict) -> Any:

@@ -34,7 +34,7 @@ class TestParseConfig:
     @pytest.mark.parametrize(
         "mutate, message",
         [
-            (lambda d: d.update(entities=[]), "at least one"),
+            (lambda d: (d.pop("time", None), d.update(entities=[])), "at least one"),
             (lambda d: d["entities"][0].pop("table"), "table is required"),
             (lambda d: d["entities"][0].update(nameColumn="name; DROP"), "plain SQL identifier"),
             (lambda d: d["entities"][0]["groups"][0].update(type="company"), "defined twice"),
@@ -97,3 +97,23 @@ class TestKindInfos:
             "sector", True, "sectors", "cd_sector", "sector",
         )  # fmt: skip
         assert sector.parent == "company" and company.id_column == "company_id" and sector.id_column == ""
+
+
+@pytest.mark.unit
+class TestTimeBlock:
+    def test_parsed(self):
+        doc = sample_document() | {"time": {"column": "yyyymm", "fiscalYearEndMonth": 3}}
+        t = parse_config(doc).time
+        assert t is not None and (t.column, t.fiscal_year_end_month, t.format) == ("yyyymm", 3, "YYYYMM")
+
+    def test_time_only_config_is_valid(self):
+        assert parse_config({"time": {"column": "yyyymm"}}).entity_types == ()
+
+    @pytest.mark.parametrize(
+        "time, message",
+        [({"column": "yyyymm", "fiscalYearEndMonth": 13}, "1-12"), ({"column": "x", "format": "DATE"}, "not supported"),
+         ({}, "time.column is required")],
+    )  # fmt: skip
+    def test_rejects(self, time, message):
+        with pytest.raises(EntityConfigError, match=message):
+            parse_config(sample_document() | {"time": time})

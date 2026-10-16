@@ -12,7 +12,7 @@
 import {
   ENTITY_STEP_FALLBACK,
   ENTITY_STEP_ID,
-  formatEntityStep,
+  EXTENSION_STEP_FORMATTERS,
 } from "../../../extensions/entity-resolution"; // cuedo-ext
 
 type DetailRecord = Record<string, unknown>;
@@ -192,7 +192,7 @@ const stepFormatters: Record<string, Formatter> = {
       : "Translated SPARQL to SQL.";
   },
 
-  [ENTITY_STEP_ID]: formatEntityStep, // cuedo-ext
+  ...EXTENSION_STEP_FORMATTERS, // cuedo-ext
 
   "t2.sql.generate": (d) => {
     // Error path: the NL→SQL strategy couldn't produce SQL (e.g. its schema

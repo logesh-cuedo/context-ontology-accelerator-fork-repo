@@ -142,6 +142,7 @@ def resolved_block(resolution: EntityResolution, config: EntityConfig) -> str:
         assert k is not None
         values = ", ".join(f"'{_quote(n)}'" for n in names)
         lines.append(f"- {kind}: {', '.join(names)} → {k.sql_column} IN ({values}){_column_note(k)}")
+    lines.append(_answer_shape(config))
     return "\n".join(lines)
 
 
@@ -166,7 +167,17 @@ def fallback_rules(config: EntityConfig) -> str:
         what = f"a {k.type} category such as a sector word" if k.is_group else f"a {k.type} name"
         lines.append(f"- {what}: LOWER({k.sql_column}) LIKE '%<word>%'{_column_note(k)}")
     lines.append("Never build <word> from a generic word alone (company, group, holdings, enterprises, india).")
+    lines.append(_answer_shape(config))
     return "\n".join(lines)
+
+
+def _answer_shape(config: EntityConfig) -> str:
+    """Make listings readable: return names and the values, never bare ids."""
+    names = ", ".join(dict.fromkeys(k.table_column if k.is_group else k.sql_column for k in config.kind_infos()))
+    return (
+        f"When the answer lists, ranks or compares entities, SELECT their name ({names}) together with "
+        "the value used (e.g. the metric being ranked) and its period column — never return only an id column."
+    )
 
 
 # ── candidates ───────────────────────────────────────────────────────────

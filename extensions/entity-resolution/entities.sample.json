@@ -6,7 +6,9 @@
       "idColumn": "company_id",
       "nameColumn": "company_name",
       "filterColumn": "company_name",
-      "describeColumns": ["cd_sector"],
+      "describeColumns": [
+        "cd_sector"
+      ],
       "acronyms": true,
       "topK": 10,
       "groups": [
@@ -20,5 +22,10 @@
         }
       ]
     }
-  ]
+  ],
+  "time": {
+    "column": "yyyymm",
+    "format": "YYYYMM",
+    "fiscalYearEndMonth": 3
+  }
 }

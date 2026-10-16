@@ -52,6 +52,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .time_period import TimeSpec
+
 DEFAULT_PARAMETER = "default"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TYPE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -130,6 +132,7 @@ class EntityConfig:
     """All entity types configured for a namespace."""
 
     entity_types: tuple[EntityTypeSpec, ...] = field(default_factory=tuple)
+    time: TimeSpec | None = None  # optional "time" block — see coa_entity.time_period
 
     def kinds(self) -> list[tuple[str, int]]:
         """(entity_type, top_k) for every searchable kind — members then groups."""
@@ -221,8 +224,13 @@ def parse_config(document: str | dict) -> EntityConfig:
         raw = json.loads(document) if isinstance(document, str) else document
     except ValueError as exc:
         raise EntityConfigError(f"not valid JSON: {exc}") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("entities"), list) or not raw["entities"]:
-        raise EntityConfigError('expected {"entities": [ ... ]} with at least one entry')
+    if not isinstance(raw, dict):
+        raise EntityConfigError('expected {"entities": [ ... ], "time": { ... }}')
+    time_spec = _parse_time(raw.get("time"))
+    entities = raw.get("entities") if raw.get("entities") is not None else []
+    if not isinstance(entities, list) or (not entities and time_spec is None):
+        raise EntityConfigError('expected {"entities": [ ... ]} with at least one entry (or a "time" block)')
+    raw = {**raw, "entities": entities}
 
     specs: list[EntityTypeSpec] = []
     seen: set[str] = set()
@@ -261,7 +269,25 @@ def parse_config(document: str | dict) -> EntityConfig:
                 raise EntityConfigError(f"entity type {kind!r} is defined twice")
             seen.add(kind)
         specs.append(spec)
-    return EntityConfig(entity_types=tuple(specs))
+    return EntityConfig(entity_types=tuple(specs), time=time_spec)
+
+
+def _parse_time(block: Any) -> TimeSpec | None:
+    """The optional ``time`` block: {"column", "format": "YYYYMM", "fiscalYearEndMonth": 1-12}."""
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise EntityConfigError("time must be an object")
+    fmt = str(block.get("format") or "YYYYMM").upper()
+    if fmt != "YYYYMM":
+        raise EntityConfigError(f"time.format {fmt!r} is not supported (only YYYYMM)")
+    try:
+        end = int(block.get("fiscalYearEndMonth", 12))
+    except (TypeError, ValueError) as exc:
+        raise EntityConfigError("time.fiscalYearEndMonth must be 1-12") from exc
+    if not 1 <= end <= 12:
+        raise EntityConfigError("time.fiscalYearEndMonth must be 1-12")
+    return TimeSpec(column=_ident(block.get("column"), "time.column"), fiscal_year_end_month=end, format=fmt)
 
 
 def parameter_name(ssm_prefix: str, key: str) -> str:
