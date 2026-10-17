@@ -1,14 +1,34 @@
 # ============================================================================
-# CDK bootstrap - CDK's OWN template, unmodified
+# CDK bootstrap - CDK's own template, WITH THE FIVE IAM ROLES REMOVED
 # ============================================================================
 #
-# Generated with `npx cdk bootstrap --show-template` from aws-cdk 2.1127.0.
-# DO NOT EDIT: regenerate it from the CDK version the deployment uses, so the
-# five role names and the asset layout match what the synth expects.
+# Generated with `npx cdk bootstrap --show-template` from aws-cdk 2.1127.0,
+# then stripped of every IAM role so this stack creates NO roles.
 #
-#   14 resources:  5 IAM roles + 1 managed policy + 2 policies
-#                  + 1 S3 bucket + 1 bucket policy + 1 ECR repository
+# The five `cdk-${Qualifier}-*-role-${AWS::AccountId}-${AWS::Region}` roles are
+# pre-created from `pvt_vpc/iam-package/roles/` by `create-iam.py`, alongside
+# the 64 application roles -- one IAM step, applied by a principal that can
+# create roles. Their names are fully determined, so the CDK CLI finds them by
+# name with nothing to wire up here.
+#
+#   7 resources:   1 S3 bucket + 1 bucket policy + 1 ECR repository
 #                  + 1 KMS key + 1 alias + 1 SSM parameter
+#                  + 1 managed policy (the optional permissions boundary)
+#
+# REMOVED FROM THE GENERATED TEMPLATE
+#
+#   FilePublishingRole, ImagePublishingRole, LookupRole, DeploymentActionRole,
+#   CloudFormationExecutionRole, and the two inline policies that attached
+#   permissions to the first two (those permissions now live in the role files
+#   in iam-package/roles/).
+#
+# The KMS key policy grants the file-publishing role access by its determined
+# ARN rather than by GetAtt, since the role is no longer a resource here. That
+# is the ONLY place this template referred to a role it did not own.
+#
+# WHEN REGENERATING from a newer CDK version, re-apply exactly those two edits:
+# delete the 5 roles + 2 attached policies, and swap the KMS key policy's
+# `${FilePublishingRole.Arn}` for the literal ARN.
 #
 # WHY THE CLIENT APPLIES THIS, NOT `cdk bootstrap`
 #
@@ -18,20 +38,24 @@
 # they apply the other three. The deployment then uses the standard
 # synthesizer, so the private flow is identical to the normal one.
 #
-# All five role names are fully determined -- `cdk-${Qualifier}-<x>-role-
-# ${AWS::AccountId}-${AWS::Region}`, with Qualifier defaulting to hnb659fds --
-# which is why they can be pre-created at all.
+# ORDER: apply the IAM package FIRST
 #
-# TWO PARAMETERS MATTER
+# This stack no longer creates the roles, so the five must already exist when
+# the CDK CLI runs. Run `create-iam.py` before applying this template.
 #
-#   CloudFormationExecutionPolicies
-#     Left empty this attaches AdministratorAccess to the role CloudFormation
-#     assumes, which would hand the deployment full admin and make the
-#     iam:CreateRole denial meaningless. Pass a scoped policy ARN instead.
+# ONE PARAMETER MATTERS
 #
 #   Qualifier
 #     Leave it at hnb659fds unless the synth is configured otherwise. It is
-#     part of every role name the deployment looks up.
+#     part of every role name the deployment looks up, and of the asset bucket
+#     and ECR repository names created here. The role files in iam-package/ are
+#     named for hnb659fds and must be renamed to match a custom qualifier.
+#
+#   CloudFormationExecutionPolicies no longer does anything here: it existed to
+#   attach policies to CloudFormationExecutionRole, which this stack no longer
+#   creates. The scoped `coa-dev-cfn-exec-policy` is attached to
+#   cdk-${Qualifier}-cfn-exec-role by the IAM package instead. The parameter is
+#   left in place so the template still matches the generated one.
 #
 # APPLY IT IN EVERY REGION THE DEPLOYMENT TOUCHES
 #
@@ -41,12 +65,16 @@
 # region and us-east-1 -- or it fails partway through on that one stack.
 # `scripts/preflight-deploy.sh` checks both.
 #
-# Apply:
+# Apply (after create-iam.py):
 #   aws cloudformation deploy \
 #     --stack-name CDKToolkit \
 #     --template-file coa-cdk-bootstrap.yaml \
-#     --capabilities CAPABILITY_NAMED_IAM \
-#     --parameter-overrides CloudFormationExecutionPolicies=<scoped-policy-arn>
+#     --capabilities CAPABILITY_IAM
+#
+# CAPABILITY_IAM rather than CAPABILITY_NAMED_IAM: no named role is created
+# here. It is still required, because the optional permissions-boundary managed
+# policy is an IAM resource. Dropping both capabilities fails when that
+# condition is on.
 #
 # The stack MUST be named CDKToolkit: that is the name the CDK CLI and the
 # preflight check look for.
@@ -221,7 +249,9 @@ Resources:
             Effect: Allow
             Principal:
               AWS:
-                Fn::Sub: ${FilePublishingRole.Arn}
+                # The role is pre-created by iam-package/ (create-iam.py), not by
+                # this stack, so this is its determined ARN rather than a GetAtt.
+                Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}
             Resource: "*"
     Condition: CreateNewKey
     UpdateReplacePolicy: Delete
@@ -348,410 +378,6 @@ Resources:
               StringLike:
                 aws:sourceArn:
                   Fn::Sub: arn:${AWS::Partition}:emr-serverless:${AWS::Region}:${AWS::AccountId}:/applications/*
-  FilePublishingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-            Condition:
-              Fn::If:
-                - ShouldDenyExternalId
-                - "Null":
-                    sts:ExternalId: "true"
-                - Ref: AWS::NoValue
-          - Action: sts:TagSession
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:AssumeRole
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-                Condition:
-                  Fn::If:
-                    - ShouldDenyExternalId
-                    - "Null":
-                        sts:ExternalId: "true"
-                    - Ref: AWS::NoValue
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:TagSession
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-              - Ref: AWS::NoValue
-      RoleName:
-        Fn::Sub: cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}
-      Tags:
-        - Key: aws-cdk:bootstrap-role
-          Value: file-publishing
-  ImagePublishingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-            Condition:
-              Fn::If:
-                - ShouldDenyExternalId
-                - "Null":
-                    sts:ExternalId: "true"
-                - Ref: AWS::NoValue
-          - Action: sts:TagSession
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:AssumeRole
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-                Condition:
-                  Fn::If:
-                    - ShouldDenyExternalId
-                    - "Null":
-                        sts:ExternalId: "true"
-                    - Ref: AWS::NoValue
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:TagSession
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-              - Ref: AWS::NoValue
-      RoleName:
-        Fn::Sub: cdk-${Qualifier}-image-publishing-role-${AWS::AccountId}-${AWS::Region}
-      Tags:
-        - Key: aws-cdk:bootstrap-role
-          Value: image-publishing
-  LookupRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-            Condition:
-              Fn::If:
-                - ShouldDenyExternalId
-                - "Null":
-                    sts:ExternalId: "true"
-                - Ref: AWS::NoValue
-          - Action: sts:TagSession
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-          - Fn::If:
-              - HasTrustedAccountsForLookup
-              - Action:
-                  - sts:AssumeRole
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccountsForLookup
-                Condition:
-                  Fn::If:
-                    - ShouldDenyExternalId
-                    - "Null":
-                        sts:ExternalId: "true"
-                    - Ref: AWS::NoValue
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccountsForLookup
-              - Action:
-                  - sts:TagSession
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccountsForLookup
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:AssumeRole
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-                Condition:
-                  Fn::If:
-                    - ShouldDenyExternalId
-                    - "Null":
-                        sts:ExternalId: "true"
-                    - Ref: AWS::NoValue
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:TagSession
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-              - Ref: AWS::NoValue
-      RoleName:
-        Fn::Sub: cdk-${Qualifier}-lookup-role-${AWS::AccountId}-${AWS::Region}
-      ManagedPolicyArns:
-        - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
-      Policies:
-        - PolicyDocument:
-            Statement:
-              - Sid: DontReadSecrets
-                Effect: Deny
-                Action:
-                  - kms:Decrypt
-                Resource: "*"
-            Version: "2012-10-17"
-          PolicyName: LookupRolePolicy
-      Tags:
-        - Key: aws-cdk:bootstrap-role
-          Value: lookup
-  FilePublishingRoleDefaultPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyDocument:
-        Statement:
-          - Action:
-              - s3:GetObject*
-              - s3:GetBucket*
-              - s3:GetEncryptionConfiguration
-              - s3:List*
-              - s3:DeleteObject*
-              - s3:PutObject*
-              - s3:Abort*
-            Resource:
-              - Fn::Sub: ${StagingBucket.Arn}
-              - Fn::Sub: ${StagingBucket.Arn}/*
-            Condition:
-              StringEquals:
-                aws:ResourceAccount:
-                  - Fn::Sub: ${AWS::AccountId}
-            Effect: Allow
-          - Action:
-              - kms:Decrypt
-              - kms:DescribeKey
-              - kms:Encrypt
-              - kms:ReEncrypt*
-              - kms:GenerateDataKey*
-            Effect: Allow
-            Resource:
-              Fn::If:
-                - CreateNewKey
-                - Fn::Sub: ${FileAssetsBucketEncryptionKey.Arn}
-                - Fn::Sub: arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${FileAssetsBucketKmsKeyId}
-        Version: "2012-10-17"
-      Roles:
-        - Ref: FilePublishingRole
-      PolicyName:
-        Fn::Sub: cdk-${Qualifier}-file-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}
-  ImagePublishingRoleDefaultPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyDocument:
-        Statement:
-          - Action:
-              - ecr:PutImage
-              - ecr:InitiateLayerUpload
-              - ecr:UploadLayerPart
-              - ecr:CompleteLayerUpload
-              - ecr:BatchCheckLayerAvailability
-              - ecr:DescribeRepositories
-              - ecr:DescribeImages
-              - ecr:BatchGetImage
-              - ecr:GetDownloadUrlForLayer
-            Resource:
-              Fn::Sub: ${ContainerAssetsRepository.Arn}
-            Effect: Allow
-          - Action:
-              - ecr:GetAuthorizationToken
-            Resource: "*"
-            Effect: Allow
-        Version: "2012-10-17"
-      Roles:
-        - Ref: ImagePublishingRole
-      PolicyName:
-        Fn::Sub: cdk-${Qualifier}-image-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}
-  DeploymentActionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-            Condition:
-              Fn::If:
-                - ShouldDenyExternalId
-                - "Null":
-                    sts:ExternalId: "true"
-                - Ref: AWS::NoValue
-          - Action: sts:TagSession
-            Effect: Allow
-            Principal:
-              AWS:
-                Ref: AWS::AccountId
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:AssumeRole
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-                Condition:
-                  Fn::If:
-                    - ShouldDenyExternalId
-                    - "Null":
-                        sts:ExternalId: "true"
-                    - Ref: AWS::NoValue
-              - Ref: AWS::NoValue
-          - Fn::If:
-              - HasTrustedAccounts
-              - Action:
-                  - sts:TagSession
-                Effect: Allow
-                Principal:
-                  AWS:
-                    Ref: TrustedAccounts
-              - Ref: AWS::NoValue
-      Policies:
-        - PolicyDocument:
-            Statement:
-              - Sid: DeployPermissions
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:DeleteChangeSet
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:CreateStack
-                  - cloudformation:UpdateStack
-                  - cloudformation:RollbackStack
-                  - cloudformation:ContinueUpdateRollback
-                Resource: "*"
-              - Sid: PipelineCrossAccountArtifactsBucket
-                Effect: Allow
-                Action:
-                  - s3:GetObject*
-                  - s3:GetBucket*
-                  - s3:List*
-                  - s3:Abort*
-                  - s3:DeleteObject*
-                  - s3:PutObject*
-                Resource: "*"
-                Condition:
-                  StringNotEquals:
-                    s3:ResourceAccount:
-                      Ref: AWS::AccountId
-              - Sid: PipelineCrossAccountArtifactsKey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:DescribeKey
-                  - kms:Encrypt
-                  - kms:ReEncrypt*
-                  - kms:GenerateDataKey*
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    kms:ViaService:
-                      Fn::Sub: s3.${AWS::Region}.amazonaws.com
-              - Action: iam:PassRole
-                Resource:
-                  Fn::Sub: ${CloudFormationExecutionRole.Arn}
-                Effect: Allow
-              - Sid: CliPermissions
-                Action:
-                  - cloudformation:DeleteStack
-                  - cloudformation:UpdateTerminationProtection
-                  - sts:GetCallerIdentity
-                Resource: "*"
-                Effect: Allow
-              - Sid: CliStagingBucket
-                Effect: Allow
-                Action:
-                  - s3:GetObject*
-                  - s3:GetBucket*
-                  - s3:List*
-                Resource:
-                  - Fn::Sub: ${StagingBucket.Arn}
-                  - Fn::Sub: ${StagingBucket.Arn}/*
-              - Sid: ReadVersion
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - Fn::Sub: arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${CdkBootstrapVersion}
-              - Sid: Refactor
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateStackRefactor
-                  - cloudformation:ExecuteStackRefactor
-                Resource: "*"
-            Version: "2012-10-17"
-          PolicyName: default
-      ManagedPolicyArns:
-        - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AWSCloudFormationReadOnlyAccess
-      RoleName:
-        Fn::Sub: cdk-${Qualifier}-deploy-role-${AWS::AccountId}-${AWS::Region}
-      Tags:
-        - Key: aws-cdk:bootstrap-role
-          Value: deploy
-  CloudFormationExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              Service: cloudformation.amazonaws.com
-        Version: "2012-10-17"
-      ManagedPolicyArns:
-        Fn::If:
-          - HasCloudFormationExecutionPolicies
-          - Ref: CloudFormationExecutionPolicies
-          - Fn::If:
-              - HasTrustedAccounts
-              - Ref: AWS::NoValue
-              - - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess
-      RoleName:
-        Fn::Sub: cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
-      PermissionsBoundary:
-        Fn::If:
-          - PermissionsBoundarySet
-          - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}
-          - Ref: AWS::NoValue
   CdkBoostrapPermissionsBoundaryPolicy:
     Condition: ShouldCreatePermissionsBoundary
     Type: AWS::IAM::ManagedPolicy

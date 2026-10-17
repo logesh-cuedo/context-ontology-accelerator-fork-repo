@@ -1,0 +1,53 @@
+{
+  "roleName": "coa-test-dev-roles-api-fn-role",
+  "stack": "coa-test-dev-namespace",
+  "logicalId": "RolesApiFnServiceRole98AF2F65",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+        ]
+      }
+    ]
+  },
+  "statementCount": 2
+}

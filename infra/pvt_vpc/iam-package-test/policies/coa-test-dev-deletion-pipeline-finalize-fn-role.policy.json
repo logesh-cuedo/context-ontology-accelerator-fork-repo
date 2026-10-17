@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:TransactWriteItems",
+        "dynamodb:DeleteItem"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+    }
+  ]
+}

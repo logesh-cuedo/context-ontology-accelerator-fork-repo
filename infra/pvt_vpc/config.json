@@ -3,37 +3,37 @@
   "_1": "The VPC ID is NOT in this file - it goes on the command line. Deploying WITHOUT -c vpc_id= runs the original flow, which creates its own VPC, security groups, endpoints and IAM roles and ignores this file entirely.",
   "_2": "Only values the build cannot derive are here. Container image URIs, the admin user, custom domains, certificates, alarm topics, WAF ids and JDBC peering are unchanged in both flows: -c context keys and SSM /{prefix}/config.",
   "_3": "The other ~21 VPC endpoints (S3, DynamoDB, Bedrock, ECR, STS, ...) still have to EXIST in the VPC, but their ids are not listed here: private DNS makes them transparent, so no code reads them. See DEPLOYMENT-NOTES.md for what to pre-create.",
-  "account": "",
-  "region": "us-east-1",
-  "prefix": "coa",
+  "account": "926193199804",
+  "region": "ap-south-1",
+  "prefix": "coa-test",
   "env": "dev",
   "vpc": {
-    "cidr": "",
+    "cidr": "10.0.0.0/16",
     "availabilityZones": [
-      "",
-      ""
+      "ap-south-1b",
+      "ap-south-1c"
     ],
     "privateSubnetIds": [
-      "",
-      ""
+      "subnet-0748f63424e7cd361",
+      "subnet-0f974030736180aad"
     ],
     "privateRouteTableIds": [
-      "",
-      ""
+      "rtb-0820d5fc891a068cf",
+      "rtb-0b66fe1081cc5280e"
     ]
   },
   "securityGroups": {
-    "lambda": "",
-    "ecs": "",
-    "neptune": "",
-    "aossVpce": "",
-    "connector": "",
-    "discoveryOcsp": "",
-    "agentCore": "",
-    "mcp": ""
+    "lambda": "sg-08f3a1b1e0cff32ea",
+    "ecs": "sg-04ba8c42d006bf9e2",
+    "neptune": "sg-0157672949dc56354",
+    "aossVpce": "sg-0e0706ddb64325436",
+    "connector": "sg-00aa83f513af737d9",
+    "discoveryOcsp": "sg-0a0ab10bf0e61964f",
+    "agentCore": "sg-0d84c5aa1f4c82bc1",
+    "mcp": "sg-071ac95da9c3664a1"
   },
   "vpcEndpoints": {
-    "aossData": ""
+    "aossData": "vpce-0f560c938c358de3e"
   },
   "_4": "Optional, and read in BOTH flows. Resources you already run, to reuse instead of create. Leave a block entirely blank and the deployment creates its own, as it always has. Fill a block in and it creates none of those resources and uses yours.",
   "existing": {

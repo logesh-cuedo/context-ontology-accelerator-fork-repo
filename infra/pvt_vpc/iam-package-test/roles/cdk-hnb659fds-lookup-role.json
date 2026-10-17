@@ -1,0 +1,41 @@
+{
+  "roleName": "cdk-hnb659fds-lookup-role-${AccountId}-${Region}",
+  "stack": "CDKToolkit",
+  "logicalId": "LookupRole",
+  "nameIsExplicit": true,
+  "description": "CDK bootstrap: read-only context lookups during synth",
+  "trustPolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${AccountId}"
+        }
+      },
+      {
+        "Action": "sts:TagSession",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${AccountId}"
+        }
+      }
+    ]
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "DontReadSecrets",
+        "Action": "kms:Decrypt",
+        "Effect": "Deny",
+        "Resource": "*"
+      }
+    ]
+  },
+  "statementCount": 1
+}

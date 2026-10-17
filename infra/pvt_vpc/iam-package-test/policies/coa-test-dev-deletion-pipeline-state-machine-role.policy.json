@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+        "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+      ]
+    },
+    {
+      "Action": [
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    }
+  ]
+}

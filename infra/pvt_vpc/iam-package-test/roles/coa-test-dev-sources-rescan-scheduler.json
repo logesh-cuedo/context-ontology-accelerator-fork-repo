@@ -1,0 +1,34 @@
+{
+  "roleName": "coa-test-dev-sources-rescan-scheduler",
+  "stack": "coa-test-dev-sources",
+  "logicalId": "RescanSchedulerRole853F6D6B",
+  "nameIsExplicit": true,
+  "description": "Assumed by EventBridge Scheduler to invoke the Sources API Lambda for recurring rescans.",
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "scheduler.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+        ]
+      }
+    ]
+  },
+  "statementCount": 1
+}

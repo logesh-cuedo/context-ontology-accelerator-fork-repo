@@ -1,0 +1,41 @@
+{
+  "roleName": "coa-test-dev-admin-user-provider-framework-role",
+  "stack": "coa-test-dev-auth",
+  "logicalId": "AdminUserAdminUserProviderFrameworkRole572A3B7F",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:GetFunction",
+        "Effect": "Allow",
+        "Resource": "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*"
+      }
+    ]
+  },
+  "statementCount": 2
+}

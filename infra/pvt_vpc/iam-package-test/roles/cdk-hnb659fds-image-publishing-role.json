@@ -1,0 +1,53 @@
+{
+  "roleName": "cdk-hnb659fds-image-publishing-role-${AccountId}-${Region}",
+  "stack": "CDKToolkit",
+  "logicalId": "ImagePublishingRole",
+  "nameIsExplicit": true,
+  "description": "CDK bootstrap: pushes container images to the assets ECR repository",
+  "trustPolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${AccountId}"
+        }
+      },
+      {
+        "Action": "sts:TagSession",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${AccountId}"
+        }
+      }
+    ]
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:DescribeRepositories",
+          "ecr:DescribeImages",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:ecr:${Region}:${AccountId}:repository/cdk-hnb659fds-container-assets-${AccountId}-${Region}"
+      },
+      {
+        "Action": "ecr:GetAuthorizationToken",
+        "Effect": "Allow",
+        "Resource": "*"
+      }
+    ]
+  },
+  "statementCount": 2
+}

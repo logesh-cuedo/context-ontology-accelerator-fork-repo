@@ -1,0 +1,27 @@
+{
+  "roleName": "coa-test-dev-not-implemented-fn-role",
+  "stack": "coa-test-dev-api",
+  "logicalId": "NotImplementedFnServiceRole7C5000C4",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": []
+  },
+  "statementCount": 0
+}

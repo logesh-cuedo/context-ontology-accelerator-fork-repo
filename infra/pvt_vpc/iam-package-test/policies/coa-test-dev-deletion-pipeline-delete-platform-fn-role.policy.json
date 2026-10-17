@@ -1,0 +1,99 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "athena:DeleteWorkGroup",
+        "athena:GetWorkGroup"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:athena:${Region}:${AccountId}:workgroup/*"
+    },
+    {
+      "Action": "sts:AssumeRole",
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-*"
+    },
+    {
+      "Action": [
+        "ecs:DeleteService",
+        "ecs:DescribeServices"
+      ],
+      "Condition": {
+        "ArnLike": {
+          "ecs:cluster": "arn:aws:ecs:${Region}:${AccountId}:cluster/coa-test-dev-*"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "servicediscovery:DeleteService",
+        "servicediscovery:ListServices",
+        "servicediscovery:ListInstances",
+        "servicediscovery:DeregisterInstance"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    }
+  ]
+}

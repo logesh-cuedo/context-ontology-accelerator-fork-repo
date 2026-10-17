@@ -1,0 +1,39 @@
+{
+  "roleName": "coa-test-dev-admin-user-lambda-role",
+  "stack": "coa-test-dev-auth",
+  "logicalId": "AdminUserLambdaServiceRoleDE742306",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminDeleteUser",
+          "cognito-idp:AdminAddUserToGroup",
+          "cognito-idp:CreateGroup",
+          "cognito-idp:DeleteGroup"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/*"
+      }
+    ]
+  },
+  "statementCount": 1
+}

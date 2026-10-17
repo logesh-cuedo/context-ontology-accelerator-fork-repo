@@ -1,0 +1,31 @@
+{
+  "roleName": "coa-test-dev-apigw-authorizer-role",
+  "stack": "coa-test-dev-api",
+  "logicalId": "AuthorizerRole8EA4615E",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "apigateway.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*"
+      }
+    ]
+  },
+  "statementCount": 1
+}

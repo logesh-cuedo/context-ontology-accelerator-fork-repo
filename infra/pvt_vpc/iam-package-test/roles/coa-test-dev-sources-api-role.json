@@ -1,0 +1,310 @@
+{
+  "roleName": "coa-test-dev-sources-api-role",
+  "stack": "coa-test-dev-sources",
+  "logicalId": "SourcesApiFnServiceRoleF51B593E",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": "s3:GetBucketTagging",
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "ReadSourceBucketTags"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-*",
+        "Sid": "AssumeFederationProvisionerRole"
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-test-dev-*"
+      },
+      {
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-test-dev-*"
+      },
+      {
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-test-dev-*"
+      },
+      {
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-test-dev-*"
+      },
+      {
+        "Action": "states:StartExecution",
+        "Effect": "Allow",
+        "Resource": "arn:aws:states:${Region}:${AccountId}:stateMachine:coa-test-dev-*"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      },
+      {
+        "Action": [
+          "datazone:Search",
+          "datazone:GetAsset",
+          "datazone:DeleteAsset"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:datazone:${Region}:${AccountId}:domain/arn:aws:ssm:${Region}:${AccountId}:parameter/*",
+          "arn:aws:datazone:${Region}:${AccountId}:domain/arn:aws:ssm:${Region}:${AccountId}:parameter/*/*"
+        ]
+      },
+      {
+        "Action": [
+          "glue:GetTags",
+          "glue:GetDatabase"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:glue:${Region}:${AccountId}:catalog",
+          "arn:aws:glue:${Region}:${AccountId}:database/*"
+        ],
+        "Sid": "GlueOwnershipTagRead"
+      },
+      {
+        "Action": [
+          "athena:CreateDataCatalog",
+          "athena:DeleteDataCatalog",
+          "athena:GetDataCatalog"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:athena:${Region}:${AccountId}:datacatalog/coadevds_*",
+        "Sid": "AthenaDataCatalogLifecycle"
+      },
+      {
+        "Action": [
+          "athena:TagResource",
+          "athena:ListTagsForResource"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:athena:${Region}:${AccountId}:datacatalog/coadevds_*",
+        "Sid": "AthenaDataCatalogTagging"
+      },
+      {
+        "Action": [
+          "ssm:PutParameter",
+          "ssm:DeleteParameter"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/coa-test/dev/connectors/databricks/sources/*",
+        "Sid": "DatabricksSourceConfigWrite"
+      },
+      {
+        "Action": "ssm:GetParameter",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/coa-test/dev/connectors/databricks/deployment/function-arn",
+        "Sid": "ReadDatabricksConnectorArnParam"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "Null": {
+            "sts:ExternalId": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::*:role/coa-test-dev-datasource-access-*",
+        "Sid": "AssumeRoleDatasourceAccessValidation"
+      },
+      {
+        "Action": "dynamodb:TransactWriteItems",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+        ]
+      },
+      {
+        "Action": "s3:PutObject",
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::coa-test-dev-*/*/raw/*"
+      },
+      {
+        "Action": "secretsmanager:DescribeSecret",
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:*:${AccountId}:secret:*",
+        "Sid": "DescribeSecretForNamespaceBinding"
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::coa-test-dev-*/*/rescan-backup/*"
+      },
+      {
+        "Action": "s3:ListBucket",
+        "Effect": "Allow",
+        "Resource": "arn:aws:s3:::coa-test-dev-*"
+      },
+      {
+        "Action": [
+          "scheduler:CreateSchedule",
+          "scheduler:UpdateSchedule",
+          "scheduler:DeleteSchedule",
+          "scheduler:GetSchedule"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:scheduler:${Region}:${AccountId}:schedule/coa-test-dev-sources-rescan/*",
+        "Sid": "ManageRescanSchedules"
+      },
+      {
+        "Action": "iam:PassRole",
+        "Condition": {
+          "StringEquals": {
+            "iam:PassedToService": "scheduler.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-*",
+        "Sid": "PassRescanSchedulerRole"
+      },
+      {
+        "Action": [
+          "events:PutRule",
+          "events:PutTargets",
+          "events:DeleteRule",
+          "events:RemoveTargets",
+          "events:DescribeRule"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:events:${Region}:${AccountId}:rule/coa-test-dev-glue-rescan-*",
+        "Sid": "ManageGlueEventRules"
+      }
+    ]
+  },
+  "statementCount": 29
+}

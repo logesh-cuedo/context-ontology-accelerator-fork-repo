@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "iam:PassRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "datazone.amazonaws.com"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-smus-exec",
+      "Sid": "IAMPassRoleStatement"
+    }
+  ]
+}

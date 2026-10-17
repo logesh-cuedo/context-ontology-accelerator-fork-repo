@@ -1,0 +1,63 @@
+{
+  "roleName": "coa-test-dev-web-custom-resource-role",
+  "stack": "coa-test-dev-web",
+  "logicalId": "WebCustomResourceRole04C3BE63",
+  "nameIsExplicit": true,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "cognito-idp:UpdateUserPoolClient",
+        "Effect": "Allow",
+        "Resource": "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/*"
+      },
+      {
+        "Action": [
+          "apigateway:PUT",
+          "apigateway:PATCH",
+          "apigateway:POST"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/*"
+      },
+      {
+        "Action": [
+          "apigateway:PUT",
+          "apigateway:PATCH",
+          "apigateway:POST"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/*"
+      },
+      {
+        "Action": "apigateway:POST",
+        "Effect": "Allow",
+        "Resource": "arn:aws:apigateway:${Region}::/restapis/*"
+      },
+      {
+        "Action": "ssm:GetParameter",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:ssm:us-east-1:${AccountId}:parameter/coa-test/edge/cloudfront-web-acl-arn"
+        ]
+      }
+    ]
+  },
+  "statementCount": 4
+}

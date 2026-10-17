@@ -1,0 +1,24 @@
+{
+  "roleName": "cdk-hnb659fds-cfn-exec-role-${AccountId}-${Region}",
+  "stack": "CDKToolkit",
+  "logicalId": "CloudFormationExecutionRole",
+  "nameIsExplicit": true,
+  "description": "CDK bootstrap: the role CloudFormation assumes to create stack resources",
+  "trustPolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "cloudformation.amazonaws.com"
+        }
+      }
+    ]
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::${AccountId}:policy/coa-test-dev-cfn-exec-policy"
+  ],
+  "inlinePolicy": {},
+  "statementCount": 0
+}

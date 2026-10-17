@@ -2327,7 +2327,11 @@ export class SourcesStack extends SCLStack {
       this,
       "SourcesOSSDataAccessPolicy",
       {
-        name: this.prefixed("src-ingestion-access"),
+        // Abbreviated: an AOSS policy name caps at 32 characters, and
+        // `prefixed()` prepends `{prefix}-{env}-`. The unabbreviated
+        // "src-ingestion-access" fits `coa-dev` but overflows by one
+        // character at `coa-test-dev`.
+        name: this.prefixed("src-ingest-access"),
         type: "data",
         policy: JSON.stringify([
           {

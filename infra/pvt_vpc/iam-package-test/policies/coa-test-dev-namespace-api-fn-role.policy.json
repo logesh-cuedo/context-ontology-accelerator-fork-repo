@@ -1,0 +1,160 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": [
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    },
+    {
+      "Action": "dynamodb:Query",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-sources/index/ByNamespace",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-metric-import-jobs"
+      ]
+    },
+    {
+      "Action": "dynamodb:TransactWriteItems",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      ]
+    },
+    {
+      "Action": [
+        "datazone:CreateProject",
+        "datazone:CreateProjectMembership",
+        "datazone:DeleteProject"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": "iam:GetRole",
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-*"
+    },
+    {
+      "Action": "ssm:GetParameter",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/coa-test/smus/*",
+        "arn:aws:ssm:${Region}:${AccountId}:parameter/coa-test/query/*"
+      ]
+    },
+    {
+      "Action": [
+        "athena:CreateWorkGroup",
+        "athena:GetWorkGroup",
+        "athena:TagResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:athena:${Region}:${AccountId}:workgroup/coa-test-dev-*"
+    },
+    {
+      "Action": [
+        "ecs:DescribeServices",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks"
+      ],
+      "Condition": {
+        "ArnLike": {
+          "ecs:cluster": "arn:aws:ecs:${Region}:${AccountId}:cluster/coa-test-dev-*"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": "states:StartExecution",
+      "Effect": "Allow",
+      "Resource": "arn:aws:states:${Region}:${AccountId}:stateMachine:coa-test-dev-*"
+    }
+  ]
+}

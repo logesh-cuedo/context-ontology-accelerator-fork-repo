@@ -1,0 +1,82 @@
+{
+  "roleName": "coa-test-dev-db-scan-state-machine-role",
+  "stack": "coa-test-dev-sources",
+  "logicalId": "DbScanStateMachineRole6A462EFE",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "states.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "dynamodb:UpdateItem",
+        "Effect": "Allow",
+        "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+        ]
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*",
+          "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-*:*"
+        ]
+      },
+      {
+        "Action": "ecs:RunTask",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ecs:${Region}:${AccountId}:task-definition/coa-test-dev-*:*"
+      },
+      {
+        "Action": [
+          "ecs:StopTask",
+          "ecs:DescribeTasks"
+        ],
+        "Effect": "Allow",
+        "Resource": "*"
+      },
+      {
+        "Action": "iam:PassRole",
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:iam::${AccountId}:role/coa-test-dev-*",
+          "arn:aws:iam::${AccountId}:role/coa-test-dev-*"
+        ]
+      },
+      {
+        "Action": [
+          "events:PutTargets",
+          "events:PutRule",
+          "events:DescribeRule"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:events:${Region}:${AccountId}:rule/StepFunctionsGetEventsForECSTaskRule"
+      },
+      {
+        "Action": "dynamodb:UpdateItem",
+        "Effect": "Allow",
+        "Resource": "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*"
+      }
+    ]
+  },
+  "statementCount": 8
+}

@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+        "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+      ]
+    }
+  ]
+}

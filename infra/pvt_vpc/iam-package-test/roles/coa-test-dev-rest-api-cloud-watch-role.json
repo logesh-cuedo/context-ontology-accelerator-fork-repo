@@ -1,0 +1,27 @@
+{
+  "roleName": "coa-test-dev-rest-api-cloud-watch-role",
+  "stack": "coa-test-dev-api",
+  "logicalId": "RestApiCloudWatchRoleE3ED6605",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "apigateway.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": []
+  },
+  "statementCount": 0
+}

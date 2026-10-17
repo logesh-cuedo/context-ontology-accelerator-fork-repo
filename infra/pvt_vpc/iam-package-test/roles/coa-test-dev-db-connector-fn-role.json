@@ -1,0 +1,272 @@
+{
+  "roleName": "coa-test-dev-db-connector-fn-role",
+  "stack": "coa-test-dev-sources",
+  "logicalId": "DbConnectorFnServiceRole66F59DFC",
+  "nameIsExplicit": false,
+  "description": null,
+  "trustPolicy": {
+    "Statement": [
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        }
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "managedPolicyArns": [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  ],
+  "inlinePolicy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Action": "sqs:SendMessage",
+        "Effect": "Allow",
+        "Resource": "arn:aws:sqs:${Region}:${AccountId}:coa-test-dev-*"
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*",
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/coa-test-dev-*/index/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:ConditionCheckItem",
+          "dynamodb:DescribeTable"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": [
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:dynamodb:${Region}:${AccountId}:table/arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+        ]
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:ssm:${Region}:${AccountId}:parameter/*"
+      },
+      {
+        "Action": [
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetPartitions",
+          "glue:GetConnection",
+          "glue:GetCatalog",
+          "glue:GetCatalogs",
+          "glue:GetTags"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:glue:${Region}:${AccountId}:catalog",
+          "arn:aws:glue:${Region}:${AccountId}:catalog/*",
+          "arn:aws:glue:${Region}:${AccountId}:database/*",
+          "arn:aws:glue:${Region}:${AccountId}:table/*/*",
+          "arn:aws:glue:${Region}:${AccountId}:connection/*"
+        ],
+        "Sid": "GlueCatalogAccess"
+      },
+      {
+        "Action": [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:StopQueryExecution",
+          "athena:GetWorkGroup"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:athena:${Region}:${AccountId}:workgroup/*",
+        "Sid": "AthenaEnumSampling"
+      },
+      {
+        "Action": "athena:GetDataCatalog",
+        "Effect": "Allow",
+        "Resource": "arn:aws:athena:${Region}:${AccountId}:datacatalog/coadevds_*",
+        "Sid": "CustomConnectorCatalogRead"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringEquals": {
+            "aws:ResourceTag/coa:connector": "true"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:lambda:${Region}:*:function:*",
+        "Sid": "AthenaFederationConnectorInvoke"
+      },
+      {
+        "Action": "lambda:InvokeFunction",
+        "Condition": {
+          "ForAnyValue:StringEquals": {
+            "aws:CalledVia": "athena.amazonaws.com"
+          },
+          "StringNotEquals": {
+            "aws:ResourceTag/coa:connector": "true"
+          }
+        },
+        "Effect": "Deny",
+        "Resource": "arn:aws:lambda:*:${AccountId}:function:*",
+        "Sid": "DenyAthenaInvokeOfUntaggedFunctions"
+      },
+      {
+        "Action": "lakeformation:GetDataAccess",
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "LakeFormationSelectForSampling"
+      },
+      {
+        "Action": [
+          "s3:GetObject*",
+          "s3:GetBucket*",
+          "s3:List*",
+          "s3:DeleteObject*",
+          "s3:PutObject",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging",
+          "s3:Abort*"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-test-dev-*",
+          "arn:aws:s3:::coa-test-dev-*/*"
+        ]
+      },
+      {
+        "Action": [
+          "s3:GetObject*",
+          "s3:GetBucket*",
+          "s3:List*",
+          "s3:DeleteObject*",
+          "s3:PutObject",
+          "s3:PutObjectLegalHold",
+          "s3:PutObjectRetention",
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging",
+          "s3:Abort*"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::coa-test-dev-*",
+          "arn:aws:s3:::coa-test-dev-*/*"
+        ]
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::${AccountId}:role/coa-test-dev-*",
+        "Sid": "AssumeLfGrantorForSelfHeal"
+      },
+      {
+        "Action": "secretsmanager:GetSecretValue",
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceAccount": "${AccountId}"
+          },
+          "Null": {
+            "secretsmanager:ResourceTag/coa:namespace": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:*:*:secret:*",
+        "Sid": "SecretsManagerCustomerProvided"
+      },
+      {
+        "Action": "secretsmanager:DescribeSecret",
+        "Effect": "Allow",
+        "Resource": "arn:aws:secretsmanager:*:${AccountId}:secret:*",
+        "Sid": "DescribeSecretForNamespaceBinding"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "Null": {
+            "sts:ExternalId": "false"
+          }
+        },
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::*:role/coa-test-dev-datasource-access-*",
+        "Sid": "AssumeRoleCoaManaged"
+      }
+    ]
+  },
+  "statementCount": 20
+}

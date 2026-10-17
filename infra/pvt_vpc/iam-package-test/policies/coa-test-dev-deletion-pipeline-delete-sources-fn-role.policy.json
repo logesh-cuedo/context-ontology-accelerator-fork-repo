@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "lambda:InvokeFunction",
+      "Effect": "Allow",
+      "Resource": "arn:aws:lambda:${Region}:${AccountId}:function:coa-test-dev-sources-api"
+    },
+    {
+      "Action": "aoss:APIAccessAll",
+      "Effect": "Allow",
+      "Resource": "arn:aws:aoss:${Region}:${AccountId}:collection/*"
+    }
+  ]
+}
