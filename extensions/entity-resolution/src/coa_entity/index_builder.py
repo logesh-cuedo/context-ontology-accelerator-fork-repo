@@ -3,15 +3,15 @@
 
 """Build a namespace's entity index from the tables named in its EntityConfig.
 
-For every configured entity type: read (id, name, describe/group columns) through
-Athena, write one document per entity, plus one document per distinct value of
-each group column. Documents are embedded with the SAME Bedrock model serve uses
-for queries and written to ``{collection}-entities-{namespace}``.
+For every configured entity type: read the id, name and extra columns through
+Athena, and make one document per entity plus one per distinct group value
+(e.g. per sector). Each document gets a vector from the SAME Bedrock embedding
+model serve uses for questions, and is saved to ``{collection}-entities-{namespace}``.
 
-Document fields (read back by :mod:`coa_entity.resolver`):
+Document fields (read back by resolver.py):
     entity_type   the configured type (e.g. ``company``, ``sector``)
     entity_uri    the entity's id (groups: the value itself)
-    text          the embedded text
+    text          the text the vector is made from
     context_text  JSON ``{"name": ..., "attrs": {column: value}}``
 """
 
@@ -27,46 +27,31 @@ from .config import EntityConfig, EntityTypeSpec
 
 BULK_CHUNK = 200
 _ATHENA_POLL_S = 1.0
-# AOSS deletes an index asynchronously: a same-name index created right after
-# can still route writes to the old one ("index_not_found ... no such index
-# [<internal id>]"). Wait for the delete to land, then let routing settle.
+# OpenSearch deletes an index in the background: a new index with the same name,
+# created right after, can still send writes to the old one ("index_not_found ...
+# no such index [<internal id>]"). So wait for the delete, then wait a little more.
 _DELETE_WAIT_S = 90.0
 _DELETE_POLL_S = 3.0
 _ROUTING_SETTLE_S = 10.0
 
-# Words that carry no identity in an acronym ("Tata Consultancy Services Ltd." → TCS).
+# Words left out of a short form ("Tata Consultancy Services Ltd." is TCS, not TCSL).
 _ACRONYM_SKIP = {
-    "the",
-    "of",
-    "and",
-    "&",
-    "-",
-    "ltd",
-    "ltd.",
-    "limited",
-    "pvt",
-    "pvt.",
-    "private",
-    "inc",
-    "inc.",
-    "co",
-    "co.",
-    "corp",
-    "corp.",
-    "corporation",
-}
+    "the", "of", "and", "&", "-", "ltd", "ltd.", "limited", "pvt", "pvt.", "private",
+    "inc", "inc.", "co", "co.", "corp", "corp.", "corporation",
+}  # fmt: skip
+_BULK_ATTEMPTS = 4
 
 
 def index_name(collection: str, namespace: str) -> str:
-    """``{collection}-entities-{namespace}`` — the namespace's base (legacy) index name."""
+    """``{collection}-entities-{namespace}``: the old index name, without a version."""
     return f"{collection}-entities-{namespace}"
 
 
 def versioned_index_name(collection: str, namespace: str, version: int) -> str:
-    """``{collection}-entities-{namespace}-v{version}`` — one build of the index.
+    """``{collection}-entities-{namespace}-v{version}``: one build of the index.
 
-    Each build writes a NEW version and the active pointer switches only once it
-    is complete, so a rebuild never leaves serve searching an empty index.
+    Each build writes a NEW version, and the pointer moves to it only when it is
+    complete, so serve never searches a half-built index.
     """
     return f"{index_name(collection, namespace)}-v{version}"
 
@@ -86,7 +71,7 @@ def parse_index_name(collection: str, index: str) -> tuple[str, int | None] | No
 
 
 def name_catalog(docs: list[tuple[str, dict]]) -> dict:
-    """The compact name list serve's name matcher loads: [kind, key, name, attrs] per entity."""
+    """The short name list serve loads for name matching: [kind, key, name, attrs] per entity."""
     entities = []
     for _, d in docs:
         ctx = json.loads(d.get("context_text") or "{}")
@@ -95,7 +80,7 @@ def name_catalog(docs: list[tuple[str, dict]]) -> dict:
 
 
 def acronyms(name: str) -> list[str]:
-    """Initials of a name's significant words: 'Tata Consultancy Services Ltd.' → ['TCS']."""
+    """Short form from the first letters: 'Tata Consultancy Services Ltd.' gives ['TCS']."""
     words = [w for w in re.split(r"[\s/]+", name) if w and w.lower().strip(".,()") not in _ACRONYM_SKIP]
     if len(words) < 2:
         return []
@@ -104,7 +89,7 @@ def acronyms(name: str) -> list[str]:
 
 
 def read_rows(athena: Any, *, database: str, spec: EntityTypeSpec, workgroup: str) -> list[dict[str, str]]:
-    """SELECT the spec's columns through Athena; one dict per distinct id (first row wins)."""
+    """Read the spec's columns through Athena. One dict per id (the first row is kept)."""
     selected = ", ".join(f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in spec.columns)
     sql = f'SELECT DISTINCT {selected} FROM "{database}"."{spec.table}" WHERE "{spec.name_column}" IS NOT NULL'
     qid = athena.start_query_execution(QueryString=sql, WorkGroup=workgroup)["QueryExecutionId"]
@@ -116,19 +101,17 @@ def read_rows(athena: Any, *, database: str, spec: EntityTypeSpec, workgroup: st
     if state["State"] != "SUCCEEDED":
         raise RuntimeError(f"Athena query {state['State']}: {state.get('StateChangeReason', '')}")
 
-    rows: list[dict[str, str]] = []
     header: list[str] | None = None
+    by_id: dict[str, dict[str, str]] = {}
     for page in athena.get_paginator("get_query_results").paginate(QueryExecutionId=qid):
         for raw in page["ResultSet"]["Rows"]:
-            values = [cell.get("VarCharValue", "") or "" for cell in raw["Data"]]
-            if header is None:
+            values = [(cell.get("VarCharValue", "") or "").strip() for cell in raw["Data"]]
+            if header is None:  # the first row is the column names
                 header = values
                 continue
-            rows.append(dict(zip(header, (v.strip() for v in values), strict=False)))
-    by_id: dict[str, dict[str, str]] = {}
-    for row in rows:
-        if row.get(spec.id_column) and row.get(spec.name_column):
-            by_id.setdefault(row[spec.id_column], row)
+            row = dict(zip(header, values, strict=False))
+            if row.get(spec.id_column) and row.get(spec.name_column):
+                by_id.setdefault(row[spec.id_column], row)  # first row per id wins
     return list(by_id.values())
 
 
@@ -145,7 +128,7 @@ def _doc(kind: str, uri: str, text: str, name: str, attrs: dict[str, str]) -> tu
 
 
 def build_documents(spec: EntityTypeSpec, rows: list[dict[str, str]]) -> list[tuple[str, dict]]:
-    """(embedding text, AOSS document without vector) for each entity and group value."""
+    """(text for the vector, OpenSearch document without the vector) for each entity and group value."""
     docs: list[tuple[str, dict]] = []
     attr_columns = [c for c in spec.columns if c not in (spec.id_column, spec.name_column)]
     children: dict[str, dict[str, set[str]]] = {g.type: {} for g in spec.groups}
@@ -174,68 +157,21 @@ def build_documents(spec: EntityTypeSpec, rows: list[dict[str, str]]) -> list[tu
     return docs
 
 
-def _wait_until_deleted(aoss: Any, index: str) -> None:
-    """Block until ``index`` no longer exists (bounded), then let AOSS routing settle."""
-    deadline = time.monotonic() + _DELETE_WAIT_S
-    while time.monotonic() < deadline:
-        try:
-            if not aoss.raw_client().indices.exists(index=index):
-                break
-        except Exception:  # a transient probe error is not worth failing the build
-            break
-        time.sleep(_DELETE_POLL_S)
-    time.sleep(_ROUTING_SETTLE_S)
+def _wait_until(aoss: Any, index: str, *, exists: bool) -> None:
+    """Wait (up to a limit) until ``index`` exists or is gone, then wait a little more.
 
-
-def _wait_until_ready(aoss: Any, index: str) -> None:
-    """Block until a just-created ``index`` exists (bounded), then let AOSS routing settle.
-
-    A write sent the instant the index is created can be rejected for the whole
-    first chunk (seen as 10 docs failing with a terminal status).
+    OpenSearch creates and deletes indexes in the background: a write sent right
+    after an index is created can be rejected.
     """
     deadline = time.monotonic() + _DELETE_WAIT_S
     while time.monotonic() < deadline:
         try:
-            if aoss.raw_client().indices.exists(index=index):
+            if aoss.raw_client().indices.exists(index=index) == exists:
                 break
-        except Exception:  # a transient probe error is not worth failing the build
+        except Exception:  # if the check itself fails, carry on with the build
             break
         time.sleep(_DELETE_POLL_S)
     time.sleep(_ROUTING_SETTLE_S)
-
-
-_BULK_ATTEMPTS = 4
-
-
-def _rejected_docs(exc: Exception) -> list[dict]:
-    """The documents a PartialIndexError reports as not indexed (their ``data``)."""
-    out = []
-    for item in getattr(exc, "errors", None) or []:
-        (result,) = item.values()
-        if isinstance(result.get("data"), dict):
-            out.append({k: v for k, v in result["data"].items() if k not in ("_op_type", "_index")})
-    return out
-
-
-def _bulk(aoss: Any, index: str, docs: list[dict]) -> None:
-    """Bulk-write; re-send only the rejected docs with back-off (no duplicates).
-
-    AOSS assigns ``_id`` itself, so re-sending a whole chunk would duplicate the
-    documents that did land — only the ones the error lists are retried.
-    """
-    pending = docs
-    for attempt in range(_BULK_ATTEMPTS):
-        try:
-            aoss.bulk_index(index, pending)
-            return
-        except Exception as exc:
-            rejected = _rejected_docs(exc)
-            transient = "index_not_found" in str(exc) or type(exc).__name__ == "PartialIndexError"
-            if attempt == _BULK_ATTEMPTS - 1 or not transient or (not rejected and "index_not_found" not in str(exc)):
-                raise
-            time.sleep(_ROUTING_SETTLE_S * (attempt + 1))
-            aoss.ensure_index(index)
-            pending = rejected or pending
 
 
 def write_index(
@@ -249,35 +185,46 @@ def write_index(
     recreate: bool = True,
     progress: Callable[[str], None] | None = None,
 ) -> int:
-    """Embed ``docs`` and (re)build ``index``. Returns the number of documents written.
+    """Make vectors for ``docs`` and save them to ``index``. Returns how many were written.
 
-    ``recreate`` drops the index first so renamed or removed entities disappear.
+    ``recreate`` deletes the index first, so renamed or removed entities disappear.
     """
     say = progress or (lambda _msg: None)
     if recreate and aoss.delete_index(index):
         say(f"dropped existing {index}")
-        _wait_until_deleted(aoss, index)
+        _wait_until(aoss, index, exists=False)
     aoss.ensure_index(index)
-    _wait_until_ready(aoss, index)
+    _wait_until(aoss, index, exists=True)
 
     written = 0
     for start in range(0, len(docs), BULK_CHUNK):
         chunk = docs[start : start + BULK_CHUNK]
         vectors = embedder.embed_documents([text for text, _ in chunk])
-        _bulk(
-            aoss,
-            index,
-            [
-                {
-                    **doc,
-                    "embedding": vec,
-                    "namespace": namespace,
-                    "model_id": embed_model_id,
-                    "embedding_type": "entity",
-                }
-                for (_, doc), vec in zip(chunk, vectors, strict=True)
-            ],
-        )
+        pending = [
+            {**doc, "embedding": vec, "namespace": namespace, "model_id": embed_model_id, "embedding_type": "entity"}
+            for (_, doc), vec in zip(chunk, vectors, strict=True)
+        ]
+        # Write in bulk. If some are rejected, wait and send only those again.
+        # OpenSearch makes its own ids, so sending the whole chunk again would
+        # save the accepted documents twice.
+        for attempt in range(_BULK_ATTEMPTS):
+            try:
+                aoss.bulk_index(index, pending)
+                break
+            except Exception as exc:
+                rejected = [
+                    {k: v for k, v in result["data"].items() if k not in ("_op_type", "_index")}
+                    for item in getattr(exc, "errors", None) or []
+                    for result in item.values()
+                    if isinstance(result.get("data"), dict)
+                ]
+                index_missing = "index_not_found" in str(exc)
+                partly_written = type(exc).__name__ == "PartialIndexError" and bool(rejected)
+                if attempt == _BULK_ATTEMPTS - 1 or not (index_missing or partly_written):
+                    raise
+                time.sleep(_ROUTING_SETTLE_S * (attempt + 1))
+                aoss.ensure_index(index)
+                pending = rejected or pending
         written += len(chunk)
         say(f"indexed {written}/{len(docs)}")
     return written
@@ -286,7 +233,7 @@ def write_index(
 def build_all_documents(
     config: EntityConfig, read: Callable[[EntityTypeSpec], list[dict[str, str]]]
 ) -> tuple[list[tuple[str, dict]], dict[str, int]]:
-    """Documents for every configured entity type; ``read`` supplies each type's rows.
+    """Documents for every configured entity type. ``read`` gives the rows of each type.
 
     Returns (documents, {entity_type: document count}).
     """

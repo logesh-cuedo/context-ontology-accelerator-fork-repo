@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from coa_entity.resolver import CLARIFICATION_MARKER, EntityCandidate, EntityResolution
-from coa_entity.serve_hook import STEP_ID, TIME_STEP_ID, EntityHook, build_entity_hook
+from coa_entity.serve_hook import STEP_ID, EntityHook, build_entity_hook
 
 from .helpers import sample_document
 
@@ -61,10 +61,20 @@ def _s3() -> MagicMock:
 def _hook(
     resolution: EntityResolution, config: dict | None = None, pointer: dict | None = None
 ) -> tuple[EntityHook, AsyncMock]:
-    resolver = AsyncMock()
-    resolver.resolve.return_value = resolution
+    resolve = _RESOLVE["mock"]
+    resolve.return_value = resolution
     ssm = _ssm(sample_document() if config is None else config, pointer)
-    return EntityHook(resolver, ssm, _s3(), "/cuedo", "coll"), resolver
+    return EntityHook(None, None, ssm, _s3(), "/cuedo", "coll"), resolve
+
+
+_RESOLVE: dict[str, AsyncMock] = {}
+
+
+@pytest.fixture(autouse=True)
+def _fake_resolve(monkeypatch):
+    """Stand in for resolve_entities; tests read its call arguments."""
+    _RESOLVE["mock"] = AsyncMock()
+    monkeypatch.setattr("coa_entity.serve_hook.resolve_entities", _RESOLVE["mock"])
 
 
 @pytest.mark.unit
@@ -82,29 +92,21 @@ class TestEntityHook:
         out = await hook.before_tier2("top 10 by pat", "ns1", [0.1], TraceCollector(), None)
         assert "Entity filters" in out.sql_context
 
-    async def test_time_period_added_next_to_entities_with_its_own_step(self):
+    async def test_time_block_is_ignored(self):
         doc = sample_document() | {"time": {"column": "yyyymm", "fiscalYearEndMonth": 3}}
         hook, _ = _hook(EntityResolution(status="no_entity"), config=doc)
         trace = TraceCollector()
         out = await hook.before_tier2("top 3 pharma companies by net sales in FY25", "ns1", [0.1], trace, None)
         assert "## Entity filters" in out.sql_context
-        assert "FY25 (Apr 2024 – Mar 2025) → yyyymm BETWEEN 202404 AND 202503" in out.sql_context
-        step = next(s for s in trace.steps if s.step == TIME_STEP_ID)
-        assert step.detail["periods"] == ["FY25 (Apr 2024 – Mar 2025)"]
-
-    async def test_no_period_no_time_step(self):
-        doc = sample_document() | {"time": {"column": "yyyymm", "fiscalYearEndMonth": 3}}
-        hook, _ = _hook(EntityResolution(status="no_entity"), config=doc)
-        trace = TraceCollector()
-        await hook.before_tier2("top 3 pharma companies by net sales", "ns1", [0.1], trace, None)
-        assert all(s.step != TIME_STEP_ID for s in trace.steps)
+        assert "Time period" not in out.sql_context and "202404" not in out.sql_context
+        assert [s.step for s in trace.steps] == [STEP_ID]
 
     async def test_searches_the_active_version_with_its_name_list(self):
         hook, resolver = _hook(EntityResolution(status="no_entity"), pointer=POINTER)
         await hook.before_tier2("norton revenue", "ns1", [0.1], TraceCollector(), None)
-        kwargs = resolver.resolve.call_args.kwargs
+        kwargs = resolver.call_args.kwargs
         assert kwargs["index"] == "coll-entities-ns1-v7"
-        assert [e.name for e in kwargs["matcher"].entries] == ["Grindwell Norton Ltd."]
+        assert [e.name for e in kwargs["matcher"]["entries"]] == ["Grindwell Norton Ltd."]
         hook._s3.get_object.assert_called_once_with(Bucket="bkt", Key="entities/ns1/v7.json")
 
     async def test_name_list_loaded_once_per_version(self):
@@ -116,8 +118,8 @@ class TestEntityHook:
     async def test_without_a_pointer_uses_the_legacy_index_and_no_names(self):
         hook, resolver = _hook(EntityResolution(status="no_entity"))
         await hook.before_tier2("q", "ns1", [0.1], TraceCollector(), None)
-        assert resolver.resolve.call_args.kwargs["index"] == "coll-entities-ns1"
-        assert resolver.resolve.call_args.kwargs["matcher"] is None
+        assert resolver.call_args.kwargs["index"] == "coll-entities-ns1"
+        assert resolver.call_args.kwargs["matcher"] is None
 
     async def test_without_config_the_step_is_absent(self):
         hook, resolver = _hook(EntityResolution(status="found"), config={})
@@ -125,7 +127,7 @@ class TestEntityHook:
         trace = TraceCollector()
         out = await hook.before_tier2("q", "ns1", [0.1], trace, None)
         assert out.sql_context == "" and out.clarification == ""
-        resolver.resolve.assert_not_called()
+        resolver.assert_not_called()
         assert not trace.steps
 
     def test_switched_off(self, monkeypatch):
@@ -168,7 +170,7 @@ class TestOrchestratorHookPoints:
         history = [{"role": "user", "content": "latest pat of bajaj"}, {"role": "assistant", "content": CLARIFY}]
         await orch.resolve(request, conversation_history=history)
         merged = "latest pat of bajaj\nUser clarification: Bajaj Auto Ltd. (Automobile)"
-        assert resolver.resolve.call_args.args[0] == merged
+        assert resolver.call_args.args[2] == merged
         assert request.query == merged
 
     async def test_without_the_hook_upstream_is_unchanged(self):

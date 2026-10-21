@@ -11,14 +11,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from coa_entity.lexical import NameEntry, NameMatcher
+from coa_entity.lexical import NameEntry, build_matcher
 from coa_entity.resolver import (
     ALL_OPTION,
     CLARIFICATION_MARKER,
     EntityCandidate,
     EntityResolution,
-    EntityResolver,
     fallback_rules,
+    resolve_entities,
     resolved_block,
     resume_clarification,
 )
@@ -37,7 +37,7 @@ COMPANY_HITS = [
     _hit("102", "Bajaj Finance Ltd.", cd_sector="Finance - NBFC"),
 ]
 SECTOR_HITS = [_hit("Automobile Two & Three Wheelers", "Automobile Two & Three Wheelers")]
-NAMES = NameMatcher(
+NAMES = build_matcher(
     [
         NameEntry("company", "201", "Grindwell Norton Ltd.", {"cd_sector": "Abrasives"}),
         NameEntry("company", "101", "Bajaj Auto Ltd.", {"cd_sector": "Automobile Two & Three Wheelers"}),
@@ -60,11 +60,13 @@ def _resolver(reply: dict | str, company_hits=COMPANY_HITS, sector_hits=SECTOR_H
     vector.search.side_effect = search
     llm = AsyncMock()
     llm.converse.return_value = SimpleNamespace(text=reply if isinstance(reply, str) else json.dumps(reply))
-    return EntityResolver(vector, llm), vector, llm
+    return (vector, llm), vector, llm
 
 
-async def _resolve(resolver, query, matcher=None):
-    return await resolver.resolve(query, "ns1", sample_config(), index="ix-v1", matcher=matcher, embedding=[0.1])
+async def _resolve(clients, query, matcher=None):
+    return await resolve_entities(
+        *clients, query, "ns1", sample_config(), index="ix-v1", matcher=matcher, embedding=[0.1]
+    )
 
 
 def _prompt(llm) -> str:
@@ -166,7 +168,7 @@ class TestOutcomes:
         assert "that name" not in res.clarification
 
     async def test_options_picked_by_name_are_never_dropped(self):
-        # the model "forgets" one of the picks — the exact-name picks still win
+        # Bedrock's reply leaves out one of the picks; the names the user picked still win
         resolver, _, _ = _resolver({"status": "found", "chosen": ["E1"]}, sector_hits=[])
         q = (
             "top 5 in automobile sector\nUser clarification: all of: Automobile Two & Three Wheelers; "

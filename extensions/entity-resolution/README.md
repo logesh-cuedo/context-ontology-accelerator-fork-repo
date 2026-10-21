@@ -71,8 +71,8 @@ next ontology publish (or run `entityctl.py invoke`).
   serve keeps using the previous version until the new one is complete.
 - **Daily** — deletes indexes of deleted namespaces and superseded versions.
 
-Fail-open: no config, a missing table/column or a read error is logged and
-skipped.
+If there is no config, a table or column is missing, or a read fails, it is
+logged and skipped.
 
 Manual runs:
 
@@ -95,7 +95,7 @@ extensions/entity-resolution/
   src/coa_entity/
     config.py          config schema + SSM lookup
     index_builder.py   Athena read → documents → embed → AOSS
-    resolver.py        candidates → LLM pick → clarification / SQL section / resume
+    resolver.py        find candidates, ask Bedrock to pick, ask the user / add SQL text, read the answer
     lexical.py         name matching (words, acronyms, prefixes, typos)
     active.py          active index-version pointer (SSM)
     serve_hook.py      the object serve's orchestrator calls

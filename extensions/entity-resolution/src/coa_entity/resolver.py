@@ -1,26 +1,24 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tier-2 entity resolution: which configured entities is the user asking about?
+"""Find out which companies or sectors a question is about.
 
-Every configured kind — an entity type such as ``company`` or a group such as
-``sector`` — goes through the SAME path (see ``config.KindInfo``):
+Companies (an entity type) and sectors (a group) are handled the same way:
 
-    user query ──► candidates per kind = vector search  ∪  name match (lexical)
-               ──► LLM picks from the candidates
-               ──► found       → exact filters handed to SQL generation
-                   no_entity   → the question names no entity; generic rules apply
-                   not_found   → ask the user (numbered options)
-                   ambiguous   → ask the user which one (numbered options; a
-                                 group kind also offers "All of these")
+    1. Collect candidates: similarity search plus name matching (lexical.py).
+    2. Ask Bedrock to pick from the candidates. The result is one of:
+         found       the exact names are added to the SQL prompt
+         no_entity   the question names nothing; the general filter rules are used
+         not_found   ask the user, with numbered options
+         ambiguous   ask the user which one, with numbered options (for sectors
+                     there is also an "All of these" option)
 
-Fail-open: a search error, no candidates or an unusable LLM reply return
-``status="skipped"`` and Tier 2 runs with the generic filter rules.
+If anything goes wrong (search error, no candidates, a reply we cannot read)
+the status is "skipped" and Tier 2 runs with the general filter rules.
 
-A clarification is resumed on the user's NEXT message through the session
-history (:func:`resume_clarification`): numbers ("2", "2.", "1,3"), "all", or a
-name are merged into the original question; a reply that is itself a new
-question is treated as a new question.
+When we ask the user to choose, their NEXT message is the answer
+(see resume_clarification): a number ("2", "2.", "1,3"), "all", or a name is
+added to the original question. If the reply is a new question, it is run as one.
 """
 
 from __future__ import annotations
@@ -34,24 +32,26 @@ from typing import Any
 import structlog
 
 from .config import EntityConfig, KindInfo
-from .lexical import NameMatcher, tokens
+from .lexical import NameEntry, exact, match, tokens
 
 logger = structlog.get_logger(__name__)
 
-# Every clarification ends with this line. resume_clarification() recognises a
-# clarification turn in the session history by it, so keep the two in sync.
+# Every "which one did you mean?" message ends with this line, so we can spot
+# it in the chat history later (see resume_clarification).
 CLARIFICATION_MARKER = "Reply with the number or the name."
 ALL_OPTION = "All of these"
+CLARIFICATION_PREFIX = "\nUser clarification:"  # the user's answer is added after this
 
 _MAX_OPTIONS = 6
-_LEXICAL_EXTRA = 8  # name-match candidates added per kind on top of vector top-k
-_OPTION_LINE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
+_NAME_MATCHES_PER_KIND = 8  # extra name matches per kind, on top of the search results
 _STATUSES = {"found", "no_entity", "not_found", "ambiguous"}
+_OPTION_LINE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
+_TRAILING_LABEL = re.compile(r"\s*\([^()]*\)\s*$")  # removes "(Automobile)" from "Bajaj Auto Ltd. (Automobile)"
 
 
 @dataclass(frozen=True)
 class EntityCandidate:
-    """One candidate entity (from vector search or name match)."""
+    """One possible match, from the similarity search or from name matching."""
 
     kind: str
     key: str
@@ -61,13 +61,13 @@ class EntityCandidate:
 
     @property
     def label(self) -> str:
-        """Option text: the name plus its first attribute, e.g. ``Bajaj Auto Ltd. (Automobile)``."""
+        """Text shown in the options list, e.g. ``Bajaj Auto Ltd. (Automobile)``."""
         return f"{self.name} ({self.attrs[0][1]})" if self.attrs else self.name
 
 
 @dataclass
 class EntityResolution:
-    """Outcome of one resolution: what was found, or what to ask the user."""
+    """The result: what was found, or what to ask the user."""
 
     status: str  # found | no_entity | not_found | ambiguous | skipped
     chosen: list[EntityCandidate] = field(default_factory=list)
@@ -76,39 +76,48 @@ class EntityResolution:
 
     @property
     def needs_clarification(self) -> bool:
-        """True when the pipeline must stop and ask the user."""
+        """True when we must stop and ask the user."""
         return self.status in ("not_found", "ambiguous")
 
     def by_kind(self) -> dict[str, list[str]]:
-        """Chosen entity names grouped by kind — the trace step's detail."""
-        out: dict[str, list[str]] = {}
+        """Chosen names grouped by kind, e.g. {"company": ["Bajaj Auto Ltd."]}."""
+        names: dict[str, list[str]] = {}
         for c in self.chosen:
-            out.setdefault(c.kind, []).append(c.name)
-        return out
+            names.setdefault(c.kind, []).append(c.name)
+        return names
 
 
-# ── SQL-prompt sections ──────────────────────────────────────────────────
+# ── text added to the SQL prompt ─────────────────────────────────────────
 
 
 def like_literal(name: str) -> str:
-    """Lower-case a name for a LIKE pattern: double quotes, drop ``%``."""
+    """Make a name safe for a LIKE pattern: lower case, double any quote, drop ``%``."""
     return name.lower().replace("'", "''").replace("%", "")
 
 
 def _quote(value: str) -> str:
-    """A SQL string-literal body: single quotes doubled."""
+    """Make text safe inside SQL quotes by doubling any single quote."""
     return value.replace("'", "''")
 
 
 def _column_note(k: KindInfo) -> str:
-    """Where the kind's column lives, when the entity table names it differently."""
+    """A note for when the entity table uses a different column name than the data tables."""
     if k.table_column and k.table_column != k.sql_column:
         return f" (fact tables: {k.sql_column}; on the {k.table} table use {k.table_column})"
     return ""
 
 
+def _answer_shape(config: EntityConfig) -> str:
+    """Tell the SQL writer to return names and values, not just id columns."""
+    names = ", ".join(dict.fromkeys(k.table_column if k.is_group else k.sql_column for k in config.kind_infos()))
+    return (
+        f"When the answer lists, ranks or compares entities, SELECT their name ({names}) together with "
+        "the value used (e.g. the metric being ranked) and its period column — never return only an id column."
+    )
+
+
 def resolved_block(resolution: EntityResolution, config: EntityConfig) -> str:
-    """SQL-prompt section naming the exact entities to filter on (status ``found``)."""
+    """The SQL prompt text that lists the exact names to filter on (only when status is "found")."""
     if resolution.status != "found" or not resolution.chosen:
         return ""
     lines = [
@@ -120,26 +129,29 @@ def resolved_block(resolution: EntityResolution, config: EntityConfig) -> str:
         "question's 'User clarification' line) only identify the entity: do NOT turn them "
         "into extra WHERE conditions unless the question asks to filter by them.",
     ]
-    groups: dict[str, list[str]] = {}
+    group_values: dict[str, list[str]] = {}
     for c in resolution.chosen:
         k = config.kind(c.kind)
         if k is None:
             continue
         if k.is_group:
-            groups.setdefault(c.kind, []).append(c.name)
-            continue
-        ident = ", ".join([f"{k.id_column} {c.key}", *(f"{a} {v}" for a, v in c.attrs)])
-        attrs = dict(c.attrs)
-        member = config.member_spec(c.kind)
-        extra = "".join(
-            f" AND {g.sql_column} = '{_quote(attrs[g.column])}'"
-            for g in (member.groups if member else ())
-            if g.filter_with_member and attrs.get(g.column)
-        )
-        lines.append(f"- {c.kind}: {c.name} ({ident}) → LOWER({k.sql_column}) LIKE '%{like_literal(c.name)}%'{extra}")
-    for kind, names in groups.items():
+            group_values.setdefault(c.kind, []).append(c.name)
+        else:  # a company: LIKE on its full name, plus its sector if the config says so
+            ident = ", ".join([f"{k.id_column} {c.key}", *(f"{a} {v}" for a, v in c.attrs)])
+            attrs = dict(c.attrs)
+            member = config.member_spec(c.kind)
+            extra = "".join(
+                f" AND {g.sql_column} = '{_quote(attrs[g.column])}'"
+                for g in (member.groups if member else ())
+                if g.filter_with_member and attrs.get(g.column)
+            )
+            lines.append(
+                f"- {c.kind}: {c.name} ({ident}) → LOWER({k.sql_column}) LIKE '%{like_literal(c.name)}%'{extra}"
+            )
+    for kind, names in group_values.items():  # one IN (...) list per group, e.g. all chosen sectors
         k = config.kind(kind)
-        assert k is not None
+        if k is None:
+            continue
         values = ", ".join(f"'{_quote(n)}'" for n in names)
         lines.append(f"- {kind}: {', '.join(names)} → {k.sql_column} IN ({values}){_column_note(k)}")
     lines.append(_answer_shape(config))
@@ -147,11 +159,7 @@ def resolved_block(resolution: EntityResolution, config: EntityConfig) -> str:
 
 
 def fallback_rules(config: EntityConfig) -> str:
-    """SQL-prompt rules for entity filters when nothing was resolved.
-
-    Applies whenever a namespace has an entity config but the resolver did not
-    produce a ``found`` result (no entity named, index missing, step skipped).
-    """
+    """The SQL prompt text with general filter rules, used when nothing was found."""
     kinds = config.kind_infos()
     if not kinds:
         return ""
@@ -171,387 +179,298 @@ def fallback_rules(config: EntityConfig) -> str:
     return "\n".join(lines)
 
 
-def _answer_shape(config: EntityConfig) -> str:
-    """Make listings readable: return names and the values, never bare ids."""
-    names = ", ".join(dict.fromkeys(k.table_column if k.is_group else k.sql_column for k in config.kind_infos()))
+# ── helpers ──────────────────────────────────────────────────────────────
+
+
+def _from_name_entry(e: NameEntry, score: float = 0.0) -> EntityCandidate:
+    return EntityCandidate(e.kind, e.key, e.name, tuple((a, v) for a, v in e.attrs.items() if v), score)
+
+
+def _selection_prompt(query: str, candidates: list[EntityCandidate], kinds: list[KindInfo]) -> str:
+    names = ", ".join(k.type for k in kinds)
+    groups = [k.type for k in kinds if k.is_group]
+    lines = "\n".join(
+        f"E{i}. [{c.kind}] {c.name}" + (" | " + ", ".join(f"{a}: {v}" for a, v in c.attrs) if c.attrs else "")
+        for i, c in enumerate(candidates, start=1)
+    )
+    group_rules = ""
+    if groups:
+        g = groups[0]
+        group_rules = (
+            f"## {'/'.join(groups).capitalize()} names count as entities\n"
+            f'- A question about companies "in", "under" or "of" a {g} NAMES that {g} '
+            f'("top 5 by PAT in automobile {g}", "median PAT of IT software companies", '
+            f'"pharma {g} revenue"). Resolve it like a company name — never "no_entity".\n'
+            f'- One {g} candidate clearly matches → "found" with it.\n'
+            f'- A broad word fits several {g} candidates (e.g. "automobile"/"automotive" fits '
+            f'Two & Three Wheelers, Passenger Cars, Tractors, …) → "ambiguous" listing ALL of '
+            f"those candidates; the user then picks one, several or all.\n"
+            f'- Only a pure breakdown names no {g}: "by {g}", "per {g}", "each {g}", '
+            f'"which {g} has the highest …".\n'
+            f"- When the question also names a specific company, the company decides its own "
+            f"{g}: choose the company (plus the {g} candidate equal to its own {g}, if listed) "
+            f'and do NOT ask which {g} — e.g. "bajaj auto pat in automobile {g}" → found Bajaj Auto.\n\n'
+        )
+    clarification_rule = (
+        "## Answer to an earlier clarification\n"
+        "If the question contains 'User clarification:', the user is answering which entity "
+        'they meant. Pick the candidate(s) their answer names and return "found" — do NOT '
+        'return "no_entity" or ask again unless the answer matches no candidate. '
+        "'all of: A; B; C' means choose every one of those.\n\n"
+    )
     return (
-        f"When the answer lists, ranks or compares entities, SELECT their name ({names}) together with "
-        "the value used (e.g. the metric being ranked) and its period column — never return only an id column."
+        f"You resolve which named entities ({names}) a data question refers to.\n"
+        "A search over the database's entity tables (by meaning and by name) returned the "
+        "candidates below. Choose ONLY from these candidates — never invent one.\n\n"
+        f"## Question\n<question>{query}</question>\n\n"
+        f"## Candidates\n{lines}\n\n"
+        "## Decide one status\n"
+        '- "no_entity": the question names no specific entity at all (e.g. "top 10 companies '
+        'by revenue", "total PAT of all companies"). The candidates are then irrelevant.\n'
+        '- "found": every entity the question names matches exactly one candidate. Short '
+        "names, acronyms (TCS → Tata Consultancy Services, L&T → Larsen & Toubro), missing "
+        "suffixes (Ltd, Limited) and small typos still count as a match. Choose every entity "
+        "the question names, of every kind.\n"
+        '- "ambiguous": a name in the question fits two or more candidates and nothing in the '
+        'question decides between them (e.g. "Bajaj" with Bajaj Auto and Bajaj Finance listed).\n'
+        '- "not_found": the question names an entity that matches NO candidate.\n\n'
+        f"{group_rules}"
+        f"{clarification_rule}"
+        "## Output — one JSON object, nothing else\n"
+        "{\n"
+        '  "status": "found" | "no_entity" | "ambiguous" | "not_found",\n'
+        '  "chosen": ["E1"],                      // found: the chosen candidate labels\n'
+        '  "mention": "bajaj",                    // ambiguous/not_found: the name as written\n'
+        '  "ambiguous_candidates": ["E1", "E2"]   // ambiguous: the candidates it could be\n'
+        "}"
     )
 
 
-# ── candidates ───────────────────────────────────────────────────────────
-
-
-def _candidate_from_hit(hit: Any, kind: str) -> EntityCandidate | None:
-    """Shape a vector hit written by coa_entity.index_builder into a candidate."""
-    meta = getattr(hit, "metadata", None) or {}
-    key = str(meta.get("entity_uri") or "").strip()
-    if not key:
-        return None
-    try:
-        ctx = json.loads(meta.get("context_text") or "{}")
-    except (TypeError, ValueError):
-        ctx = {}
-    name = str(ctx.get("name") or "").strip() or key
-    attrs = ctx.get("attrs") if isinstance(ctx.get("attrs"), dict) else {}
-    return EntityCandidate(
-        kind=kind,
-        key=key,
-        name=name,
-        attrs=tuple((str(a), str(v)) for a, v in attrs.items() if v),
-        score=float(getattr(hit, "score", 0.0) or 0.0),
-    )
-
-
-def _merge(per_kind_vector: dict[str, list[EntityCandidate]], lexical: list[EntityCandidate]) -> list[EntityCandidate]:
-    """Name matches first (they carry the user's exact words), then vector hits; deduped."""
-    out: list[EntityCandidate] = []
-    seen: set[tuple[str, str]] = set()
-    kinds = list(dict.fromkeys([*per_kind_vector, *(c.kind for c in lexical)]))
-    for kind in kinds:
-        for c in [*(c for c in lexical if c.kind == kind), *per_kind_vector.get(kind, [])]:
-            if (c.kind, c.key) not in seen:
-                seen.add((c.kind, c.key))
-                out.append(c)
-    return out
-
-
-def _parse_json_object(text: str) -> dict | None:
-    """Extract the first JSON object from an LLM reply (tolerates fences/prose)."""
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _numbered(candidates: list[EntityCandidate], *, offer_all: bool = False) -> str:
+def _numbered(candidates: list[EntityCandidate], offer_all: bool = False) -> str:
     lines = [f"{i}. {c.label}" for i, c in enumerate(candidates, start=1)]
     if offer_all:
         lines.append(f"{len(candidates) + 1}. {ALL_OPTION}")
     return "\n".join(lines)
 
 
-class EntityResolver:
-    """Candidates (vector ∪ name match) → LLM selection, one path for every kind."""
+async def resolve_entities(
+    vector_client: Any,
+    llm_client: Any,
+    query: str,
+    namespace: str,
+    config: EntityConfig,
+    *,
+    index: str,
+    matcher: dict | None = None,
+    embedding: list[float] | None = None,
+    model_id: str | None = None,
+) -> EntityResolution:
+    """Find the companies / sectors the question is about. Never raises an error."""
+    kinds = config.kind_infos()
 
-    def __init__(self, vector_client: Any, llm_client: Any):
-        """Wire serve's shared clients (AOSS search and Bedrock)."""
-        self._vector = vector_client
-        self._llm = llm_client
+    # 1a. Names that share words with the question.
+    by_name = []
+    if matcher is not None:
+        matches = match(matcher, query, {k.type: _NAME_MATCHES_PER_KIND for k in kinds})
+        by_name = [_from_name_entry(e, score) for e, score in matches]
 
-    async def resolve(
-        self,
-        query: str,
-        namespace: str,
-        config: EntityConfig,
-        *,
-        index: str,
-        matcher: NameMatcher | None = None,
-        embedding: list[float] | None = None,
-        model_id: str | None = None,
-    ) -> EntityResolution:
-        """Resolve the configured entities a question refers to. Never raises."""
-        kinds = config.kind_infos()
-        lexical: list[EntityCandidate] = []
-        if matcher is not None:
-            for e, score in matcher.match(query, {k.type: _LEXICAL_EXTRA for k in kinds}):
-                lexical.append(
-                    EntityCandidate(
-                        kind=e.kind,
-                        key=e.key,
-                        name=e.name,
-                        attrs=tuple((a, v) for a, v in e.attrs.items() if v),
-                        score=score,
-                    )
-                )
+    # 1b. Similarity search for each kind, all at once. Each search is tried twice,
+    #     because OpenSearch can be slow to wake up.
+    async def search(k: KindInfo, vector: list[float]) -> list[Any]:
         try:
-            vector = embedding or await self._llm.embed(query)
-            per_kind = await self._search(vector, namespace, index, kinds)
-        except Exception as exc:
-            logger.warning("entity_search_failed", namespace=namespace, error=str(exc)[:200])
-            if not lexical:
-                return EntityResolution(status="skipped", reason="similarity search failed")
-            per_kind = {}
-        picks = _picked_entities(query, matcher)
-        candidates = _merge(per_kind, [*lexical, *(c for c in picks if c not in lexical)])
-        if not candidates:
-            return EntityResolution(status="skipped", reason="entity index empty")
-
-        try:
-            reply = await self._llm.converse(
-                self._selection_prompt(query, candidates, kinds),
-                max_tokens=1500,
-                temperature=0.0,
-                model_id=model_id,
+            return await vector_client.search(
+                vector, namespace=namespace, top_k=k.top_k, index=index, entity_type=k.type
             )
-            choice = _parse_json_object(reply.text or "")
-        except Exception as exc:
-            logger.warning("entity_selection_failed", namespace=namespace, error=str(exc)[:200])
-            choice = None
-        if choice is None or choice.get("status") not in _STATUSES:
-            return EntityResolution(status="skipped", reason="unusable selection reply")
-
-        resolution = self._build_resolution(choice, candidates, config, query)
-        if picks:
-            # Options the user picked by exact name are certain — never left to the model.
-            keep = [c for c in resolution.chosen if (c.kind, c.key) not in {(p.kind, p.key) for p in picks}]
-            resolution = EntityResolution(status="found", chosen=[*picks, *keep])
-        logger.info(
-            "entity_resolved",
-            namespace=namespace,
-            status=resolution.status,
-            entities=resolution.by_kind(),
-            candidates=len(candidates),
-            lexical=len(lexical),
-        )
-        return resolution
-
-    async def _search(
-        self, vector: list[float], namespace: str, index: str, kinds: list[KindInfo]
-    ) -> dict[str, list[EntityCandidate]]:
-        """Vector top-k per kind, in parallel; one retry (AOSS may be scaling up from zero)."""
-
-        async def one(k: KindInfo) -> list[Any]:
-            for attempt in range(2):
-                try:
-                    return await self._vector.search(
-                        vector, namespace=namespace, top_k=k.top_k, index=index, entity_type=k.type
-                    )
-                except Exception:
-                    if attempt:
-                        raise
-                    await asyncio.sleep(1.5)
-            return []
-
-        results = await asyncio.gather(*(one(k) for k in kinds))
-        return {
-            k.type: [c for h in hits if (c := _candidate_from_hit(h, k.type))]
-            for k, hits in zip(kinds, results, strict=True)
-        }
-
-    @staticmethod
-    def _selection_prompt(query: str, candidates: list[EntityCandidate], kinds: list[KindInfo]) -> str:
-        names = ", ".join(k.type for k in kinds)
-        groups = [k.type for k in kinds if k.is_group]
-        lines = "\n".join(
-            f"E{i}. [{c.kind}] {c.name}" + (" | " + ", ".join(f"{a}: {v}" for a, v in c.attrs) if c.attrs else "")
-            for i, c in enumerate(candidates, start=1)
-        )
-        group_rules = ""
-        if groups:
-            g = groups[0]
-            group_rules = (
-                f"## {'/'.join(groups).capitalize()} names count as entities\n"
-                f'- A question about companies "in", "under" or "of" a {g} NAMES that {g} '
-                f'("top 5 by PAT in automobile {g}", "median PAT of IT software companies", '
-                f'"pharma {g} revenue"). Resolve it like a company name — never "no_entity".\n'
-                f'- One {g} candidate clearly matches → "found" with it.\n'
-                f'- A broad word fits several {g} candidates (e.g. "automobile"/"automotive" fits '
-                f'Two & Three Wheelers, Passenger Cars, Tractors, …) → "ambiguous" listing ALL of '
-                f"those candidates; the user then picks one, several or all.\n"
-                f'- Only a pure breakdown names no {g}: "by {g}", "per {g}", "each {g}", '
-                f'"which {g} has the highest …".\n'
-                f"- When the question also names a specific company, the company decides its own "
-                f"{g}: choose the company (plus the {g} candidate equal to its own {g}, if listed) "
-                f'and do NOT ask which {g} — e.g. "bajaj auto pat in automobile {g}" → found Bajaj Auto.\n\n'
+        except Exception:
+            await asyncio.sleep(1.5)
+            return await vector_client.search(
+                vector, namespace=namespace, top_k=k.top_k, index=index, entity_type=k.type
             )
-        clarification_rule = (
-            "## Answer to an earlier clarification\n"
-            "If the question contains 'User clarification:', the user is answering which entity "
-            'they meant. Pick the candidate(s) their answer names and return "found" — do NOT '
-            'return "no_entity" or ask again unless the answer matches no candidate. '
-            "'all of: A; B; C' means choose every one of those.\n\n"
+
+    vector_hits: dict[str, list[EntityCandidate]] = {}
+    try:
+        vector = embedding or await llm_client.embed(query)
+        results = await asyncio.gather(*(search(k, vector) for k in kinds))
+    except Exception as exc:
+        logger.warning("entity_search_failed", namespace=namespace, error=str(exc)[:200])
+        if not by_name:
+            return EntityResolution(status="skipped", reason="similarity search failed")
+        results = []
+    for k, hits in zip(kinds, results, strict=False):
+        vector_hits[k.type] = []
+        for hit in hits:  # each hit is a document saved by index_builder; skip it if it has no id
+            meta = getattr(hit, "metadata", None) or {}
+            key = str(meta.get("entity_uri") or "").strip()
+            if not key:
+                continue
+            try:
+                context = json.loads(meta.get("context_text") or "{}")
+            except (TypeError, ValueError):
+                context = {}
+            name = str(context.get("name") or "").strip() or key
+            attrs = context.get("attrs") if isinstance(context.get("attrs"), dict) else {}
+            pairs = tuple((str(a), str(v)) for a, v in attrs.items() if v)
+            vector_hits[k.type].append(
+                EntityCandidate(k.type, key, name, pairs, float(getattr(hit, "score", 0.0) or 0.0))
+            )
+
+    # 1c. Names the user picked from our options (e.g. "Bajaj Auto Ltd." or "all of: A; B").
+    #     Used only if every part matches exactly one name. A typed answer such as
+    #     "bajaj auto" is left for Bedrock to decide.
+    picks: list[EntityCandidate] = []
+    if matcher is not None and CLARIFICATION_PREFIX in query:
+        answer = query.split(CLARIFICATION_PREFIX)[-1].strip()
+        parts = (
+            [p.strip() for p in answer.removeprefix("all of:").split(";")] if answer.startswith("all of:") else [answer]
         )
-        return (
-            f"You resolve which named entities ({names}) a data question refers to.\n"
-            "A search over the database's entity tables (by meaning and by name) returned the "
-            "candidates below. Choose ONLY from these candidates — never invent one.\n\n"
-            f"## Question\n<question>{query}</question>\n\n"
-            f"## Candidates\n{lines}\n\n"
-            "## Decide one status\n"
-            '- "no_entity": the question names no specific entity at all (e.g. "top 10 companies '
-            'by revenue", "total PAT of all companies"). The candidates are then irrelevant.\n'
-            '- "found": every entity the question names matches exactly one candidate. Short '
-            "names, acronyms (TCS → Tata Consultancy Services, L&T → Larsen & Toubro), missing "
-            "suffixes (Ltd, Limited) and small typos still count as a match. Choose every entity "
-            "the question names, of every kind.\n"
-            '- "ambiguous": a name in the question fits two or more candidates and nothing in the '
-            'question decides between them (e.g. "Bajaj" with Bajaj Auto and Bajaj Finance listed).\n'
-            '- "not_found": the question names an entity that matches NO candidate.\n\n'
-            f"{group_rules}"
-            f"{clarification_rule}"
-            "## Output — one JSON object, nothing else\n"
-            "{\n"
-            '  "status": "found" | "no_entity" | "ambiguous" | "not_found",\n'
-            '  "chosen": ["E1"],                      // found: the chosen candidate labels\n'
-            '  "mention": "bajaj",                    // ambiguous/not_found: the name as written\n'
-            '  "ambiguous_candidates": ["E1", "E2"]   // ambiguous: the candidates it could be\n'
-            "}"
+        for part in parts:
+            hits = exact(matcher, part) or exact(matcher, _TRAILING_LABEL.sub("", part))
+            if len(hits) != 1:
+                picks = []
+                break
+            picks.append(_from_name_entry(hits[0]))
+
+    # 1d. Put the lists together, per kind: name matches first (they use the user's own
+    #     words), then search results. No duplicates.
+    named = [*by_name, *(p for p in picks if p not in by_name)]
+    candidates: list[EntityCandidate] = []
+    seen: set[tuple[str, str]] = set()
+    for kind in dict.fromkeys([*vector_hits, *(c.kind for c in named)]):
+        for c in [*(c for c in named if c.kind == kind), *vector_hits.get(kind, [])]:
+            if (c.kind, c.key) not in seen:
+                seen.add((c.kind, c.key))
+                candidates.append(c)
+    if not candidates:
+        return EntityResolution(status="skipped", reason="entity index empty")
+
+    # 2. Ask Bedrock to choose. Its reply should contain one JSON object.
+    try:
+        reply = await llm_client.converse(
+            _selection_prompt(query, candidates, kinds), max_tokens=1500, temperature=0.0, model_id=model_id
         )
+    except Exception as exc:
+        logger.warning("entity_selection_failed", namespace=namespace, error=str(exc)[:200])
+        return EntityResolution(status="skipped", reason="unusable selection reply")
+    text = reply.text or ""
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        choice = json.loads(text[start : end + 1]) if start != -1 and end > start else None
+    except ValueError:
+        choice = None
+    if not isinstance(choice, dict) or choice.get("status") not in _STATUSES:
+        return EntityResolution(status="skipped", reason="unusable selection reply")
 
-    @staticmethod
-    def _build_resolution(
-        choice: dict, candidates: list[EntityCandidate], config: EntityConfig, query: str
-    ) -> EntityResolution:
-        """Validate the LLM's labels against the candidate list and build the outcome."""
-        by_label = {f"E{i}": c for i, c in enumerate(candidates, start=1)}
+    # 3. Read the choice. Only labels that exist in our list (E1, E2, ...) are kept.
+    by_label = {f"E{i}": c for i, c in enumerate(candidates, start=1)}
 
-        def pick(labels: object) -> list[EntityCandidate]:
-            picked: list[EntityCandidate] = []
-            for label in labels if isinstance(labels, list) else []:
-                cand = by_label.get(str(label).strip().upper())
-                if cand is not None and cand not in picked:  # hallucinated labels dropped
-                    picked.append(cand)
-            return picked
+    def chosen_from(labels: object) -> list[EntityCandidate]:
+        found = [by_label.get(str(label).strip().upper()) for label in (labels if isinstance(labels, list) else [])]
+        return list(dict.fromkeys(c for c in found if c is not None))  # unknown labels dropped, no repeats
 
-        status = choice["status"]
-        mention = str(choice.get("mention") or "").strip() or _mention_fallback(query)
-
-        if status == "found":
-            chosen = pick(choice.get("chosen"))
-            if chosen:
-                return EntityResolution(status="found", chosen=chosen)
-            status = "not_found"  # "found" with no valid label → ask rather than guess
-
-        if status == "ambiguous":
-            options = pick(choice.get("ambiguous_candidates"))[:_MAX_OPTIONS]
-            if len(options) >= 2:
-                offer_all = all((k := config.kind(o.kind)) is not None and k.is_group for o in options)
-                return EntityResolution(
-                    status="ambiguous",
-                    clarification=(
-                        f"**{mention}** matches more than one entry. Which one did you mean?\n\n"
-                        f"{_numbered(options, offer_all=offer_all)}\n\n{CLARIFICATION_MARKER}"
-                    ),
-                )
-            status = "not_found"
-
-        if status == "not_found":
-            kinds = " or ".join(k.type for k in config.kind_infos())
-            return EntityResolution(
-                status="not_found",
+    status = choice["status"]
+    # If the reply did not say which name, use the user's own words.
+    mention = str(choice.get("mention") or "").strip() or query.split(CLARIFICATION_PREFIX)[-1].strip()[:60]
+    mention = mention or "that name"
+    resolution = EntityResolution(status="no_entity")
+    if status == "found":
+        chosen = chosen_from(choice.get("chosen"))
+        resolution = EntityResolution(status="found", chosen=chosen)
+        if not chosen:
+            status = "not_found"  # "found" but no valid label: ask the user instead of guessing
+    if status == "ambiguous":
+        options = chosen_from(choice.get("ambiguous_candidates"))[:_MAX_OPTIONS]
+        if len(options) >= 2:
+            all_groups = all((info := config.kind(o.kind)) is not None and info.is_group for o in options)
+            resolution = EntityResolution(
+                status="ambiguous",
                 clarification=(
-                    f"I couldn't find **{mention}** among this namespace's {kinds} entries. "
-                    f"Did you mean one of these?\n\n{_numbered(candidates[: _MAX_OPTIONS - 1])}\n\n"
-                    f"{CLARIFICATION_MARKER}"
+                    f"**{mention}** matches more than one entry. Which one did you mean?\n\n"
+                    f"{_numbered(options, offer_all=all_groups)}\n\n{CLARIFICATION_MARKER}"
                 ),
             )
-
-        return EntityResolution(status="no_entity")
-
-
-_TRAILING_LABEL = re.compile(r"\s*\([^()]*\)\s*$")
-
-
-def _picked_entities(query: str, matcher: NameMatcher | None) -> list[EntityCandidate]:
-    """Entities a clarification reply names EXACTLY (option labels, "all of: A; B").
-
-    Returns [] unless every picked part maps to exactly one entity, so a
-    free-text reply ("bajaj auto") still goes to the model.
-    """
-    if matcher is None or "\nUser clarification:" not in query:
-        return []
-    answer = query.split("\nUser clarification:")[-1].strip()
-    parts = [p.strip() for p in answer.removeprefix("all of:").split(";")] if answer.startswith("all of:") else [answer]
-    out: list[EntityCandidate] = []
-    for part in parts:
-        hits = matcher.exact(part) or matcher.exact(_TRAILING_LABEL.sub("", part))
-        if len(hits) != 1:
-            return []
-        e = hits[0]
-        out.append(
-            EntityCandidate(kind=e.kind, key=e.key, name=e.name, attrs=tuple((a, v) for a, v in e.attrs.items() if v))
+        else:
+            status = "not_found"
+    if status == "not_found":
+        kind_names = " or ".join(k.type for k in kinds)
+        resolution = EntityResolution(
+            status="not_found",
+            clarification=(
+                f"I couldn't find **{mention}** among this namespace's {kind_names} entries. "
+                f"Did you mean one of these?\n\n{_numbered(candidates[: _MAX_OPTIONS - 1])}\n\n"
+                f"{CLARIFICATION_MARKER}"
+            ),
         )
-    return out
+
+    # 4. Names the user picked from our options are always kept as chosen.
+    if picks:
+        picked_keys = {(p.kind, p.key) for p in picks}
+        others = [c for c in resolution.chosen if (c.kind, c.key) not in picked_keys]
+        resolution = EntityResolution(status="found", chosen=[*picks, *others])
+
+    logger.info(
+        "entity_resolved",
+        namespace=namespace,
+        status=resolution.status,
+        entities=resolution.by_kind(),
+        candidates=len(candidates),
+        lexical=len(by_name),
+    )
+    return resolution
 
 
-def _mention_fallback(query: str) -> str:
-    """The user's own words when the LLM gave no mention (never the literal "that name")."""
-    text = query.split("\nUser clarification:")[-1].strip()
-    return text[:60] or "that name"
-
-
-# ── resuming a clarification ─────────────────────────────────────────────
+# ── reading the user's answer to our question ────────────────────────────
 
 _ALL_REPLIES = {"all", "all of them", "all of these", "all of those", "both", "everything", "all the above"}
 _NUMBERS_ONLY = re.compile(r"^(?:#|no\.?|option|options|number)?\s*\d+(?:\s*(?:,|&|and|/|\s)\s*\d+)*\s*[.)]?$")
 
 
-def _options(clarification: str) -> dict[str, str]:
-    return {m.group(1): m.group(2) for line in clarification.splitlines() if (m := _OPTION_LINE.match(line))}
-
-
-def _option_names(options: dict[str, str]) -> set[str]:
-    words: set[str] = set()
-    for text in options.values():
-        words |= set(tokens(text))
-    return words
-
-
-def _is_new_question(answer: str, original: str, options: dict[str, str]) -> bool:
-    """True when the reply asks a fresh question rather than picking an option.
-
-    "total revenue of grindell" after "total revenue of norton" repeats the
-    question's own words (total, revenue) — that is a new question, not a pick.
-    """
-    entity_words = _option_names(options)
-    ans = [w for w in tokens(answer) if w not in entity_words]
-    orig = set(tokens(original)) - entity_words
-    return len(tokens(answer)) >= 3 and len(set(ans) & orig) >= 2
-
-
 def resume_clarification(query: str, history: list[dict[str, str]] | None) -> str | None:
-    r"""Merge the user's reply into the question that triggered a clarification.
+    r"""Add the user's answer to the question we asked them about.
 
-    When the previous assistant turn was an entity clarification (it ends with
-    :data:`CLARIFICATION_MARKER`), the current ``query`` is the user's answer:
+    If our last reply was a "which one did you mean?" message (it ends with
+    CLARIFICATION_MARKER), then ``query`` is the user's answer:
 
-    - numbers ("2", "2.", "#2", "1,3", "1 and 3") pick those options;
-    - "all" / "both" / the "All of these" option pick every listed option;
-    - a reply that is itself a new question returns ``None`` (run it as asked);
-    - anything else (a name) is used as written.
+    - numbers ("2", "2.", "#2", "1,3", "1 and 3") pick those options
+    - "all", "both" or the "All of these" option pick every option
+    - a new question returns None, so it is run as asked
+    - anything else (a name) is used as typed
 
-    Returns ``"<original question>\\nUser clarification: <answer>"`` or ``None``.
+    Returns "<original question>\\nUser clarification: <answer>", or None.
     """
-    if not history:
+    # Our last reply must be a "which one did you mean?" message, about an earlier question.
+    history = history or []
+    roles = [str(turn.get("role")) for turn in history]
+    if "assistant" not in roles:
         return None
-    last_assistant = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "assistant"), None)
-    if last_assistant is None:
-        return None
-    clarification = str(history[last_assistant].get("content") or "")
+    i = len(roles) - 1 - roles[::-1].index("assistant")
+    clarification = str(history[i].get("content") or "")
     if CLARIFICATION_MARKER not in clarification:
         return None
-    original = next(
-        (
-            str(history[j].get("content") or "")
-            for j in range(last_assistant - 1, -1, -1)
-            if history[j].get("role") == "user"
-        ),
-        "",
-    )
-    if not original:
+    questions = [str(t.get("content") or "") for t in history[:i] if t.get("role") == "user"]
+    if not questions or not questions[-1]:
         return None
-    # A resumed question can itself be a resumed question; keep only the root.
-    original = original.split("\nUser clarification:")[0]
+    original = questions[-1].split(CLARIFICATION_PREFIX)[0]  # keep only the first question
 
-    options = _options(clarification)
-    picks = {k: v for k, v in options.items() if v != ALL_OPTION}
-    raw = query.strip()
-    lowered = raw.lower().strip(" .!")
-    answer = raw
-    if _NUMBERS_ONLY.match(lowered):
-        chosen = [options[n] for n in re.findall(r"\d+", lowered) if n in options]
-        if any(c == ALL_OPTION for c in chosen):
-            chosen = list(picks.values())
+    # The numbered options we offered: {"1": "Bajaj Auto Ltd. (Automobile)", ...}
+    options = {m.group(1): m.group(2) for line in clarification.splitlines() if (m := _OPTION_LINE.match(line))}
+    real_options = [text for text in options.values() if text != ALL_OPTION]
+    reply = query.strip()
+    normalised = reply.lower().strip(" .!")
+    answer = reply
+    if _NUMBERS_ONLY.match(normalised):
+        chosen = [options[n] for n in re.findall(r"\d+", normalised) if n in options]
+        if ALL_OPTION in chosen:
+            chosen = real_options
         if chosen:
             answer = chosen[0] if len(chosen) == 1 else "all of: " + "; ".join(chosen)
-    elif lowered in _ALL_REPLIES and picks:
-        answer = "all of: " + "; ".join(picks.values())
-    elif _is_new_question(raw, original, options):
-        return None
-    return f"{original}\nUser clarification: {answer}"
+    elif normalised in _ALL_REPLIES and real_options:
+        answer = "all of: " + "; ".join(real_options)
+    else:
+        # Is it a new question instead of a pick? "total revenue of grindell" after
+        # "total revenue of norton" repeats words of the question (total, revenue).
+        option_words = {w for text in options.values() for w in tokens(text)}
+        answer_words = {w for w in tokens(reply) if w not in option_words}
+        question_words = set(tokens(original)) - option_words
+        if len(tokens(reply)) >= 3 and len(answer_words & question_words) >= 2:
+            return None
+    return f"{original}{CLARIFICATION_PREFIX} {answer}"

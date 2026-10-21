@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from coa_entity.lexical import NameEntry, NameMatcher, acronym, kind_words, tokens
+from coa_entity.lexical import NameEntry, acronym, build_matcher, kind_words, match, matcher_from_catalog, tokens
 
 ENTRIES = [
     NameEntry("company", "1", "Grindwell Norton Ltd."),
@@ -22,15 +22,15 @@ ENTRIES = [
     NameEntry("sector", "s3", "IT - Software"),
     NameEntry("sector", "s4", "Pharmaceuticals & Drugs"),
 ]
-M = NameMatcher(ENTRIES)
+M = build_matcher(ENTRIES)
 
 
 def names(query: str, k: int = 5) -> list[str]:
-    return [e.name for e, _ in M.match(query, {"company": k, "sector": k})]
+    return [e.name for e, _ in match(M, query, {"company": k, "sector": k})]
 
 
 @pytest.mark.unit
-class TestNameMatcher:
+class TestMatch:
     def test_tokens_and_acronyms(self):
         assert tokens("Larsen & Toubro Ltd.") == ["larsen", "toubro"]
         assert acronym("Tata Consultancy Services Ltd.") == "tcs"
@@ -63,5 +63,5 @@ class TestNameMatcher:
         assert "Nifty Services Sector" not in names("top companies by sector")
 
     def test_from_catalog(self):
-        m = NameMatcher.from_catalog({"entities": [["sector", "IT - Software", "IT - Software", {}]]})
-        assert [e.name for e, _ in m.match("it software", {"sector": 3})] == ["IT - Software"]
+        m = matcher_from_catalog({"entities": [["sector", "IT - Software", "IT - Software", {}]]})
+        assert [e.name for e, _ in match(m, "it software", {"sector": 3})] == ["IT - Software"]

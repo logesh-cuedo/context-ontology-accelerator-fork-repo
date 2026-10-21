@@ -1,17 +1,17 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Operator CLI for the entity-resolution extension.
+"""Command-line tool for the entity-resolution extension.
 
     entityctl.py config put  --prefix cuedo FILE [--namespace ID]   validate + store a config
     entityctl.py config get  --prefix cuedo [--namespace ID]        print the effective config
     entityctl.py build       --prefix cuedo --namespace ID          rebuild one index (locally)
     entityctl.py invoke      --prefix cuedo --namespace ID          rebuild via the deployed Lambda
     entityctl.py status      --prefix cuedo --namespace ID          show the active index version
-    entityctl.py sweep       --prefix cuedo                         delete orphaned/stale indexes
+    entityctl.py sweep       --prefix cuedo                         delete unused / old indexes
 
 ``config put`` without ``--namespace`` writes the deployment default
-(``/<prefix>/entities/default``). A namespace override wins over the default.
+(``/<prefix>/entities/default``). A namespace's own config is used before the default.
 
 Run from the repo root, e.g.:
     PYTHONPATH=extensions/entity-resolution/src uv run python \\
@@ -56,7 +56,7 @@ def _config_get(args: argparse.Namespace, session: boto3.Session) -> int:
 
 
 def _lambda_env(args: argparse.Namespace, session: boto3.Session) -> None:
-    """Point coa_entity.lambda_handler at the deployment, as the Lambda's own env does."""
+    """Set the same environment variables the deployed Lambda has, so lambda_handler works locally."""
     ssm = session.client("ssm")
 
     def param(name: str) -> str:

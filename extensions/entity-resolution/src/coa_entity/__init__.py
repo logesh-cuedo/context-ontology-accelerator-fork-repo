@@ -1,8 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generic Tier-2 entity resolution (extension — see extensions/entity-resolution/README.md).
+"""Finds the companies / sectors a question is about, for Tier 2 (see README.md).
 
-Modules are imported individually on purpose: the index-build Lambda imports
-``index_builder`` / ``config`` without pulling in serve (``coa_serve``).
+Import each module by itself: the index-build Lambda imports ``index_builder``
+and ``config`` and must not load serve (``coa_serve``).
 """

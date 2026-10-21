@@ -1,26 +1,27 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Name matching over a namespace's entity names — the complement to vector search.
+"""Find entity names by the words in the question.
 
-Vector search finds entities by meaning but misses partial names ("norton" →
-Grindwell Norton Ltd.) and broad category words ("automobile" → every
-automobile sector). This matcher scores names by the words they share with the
-question, weighting rare words (``norton``) above common ones (``ltd``,
-``india``) with an IDF taken from the names themselves, so it works for any
-entity type without a domain word list.
+The similarity search finds entities by meaning, but it can miss part of a name
+("norton" for Grindwell Norton Ltd.) or a broad word ("automobile" for every
+automobile sector). This file fills that gap: each name is scored by the words
+it shares with the question. Rare words (``norton``) count more than common
+ones (``ltd``, ``india``). How rare a word is comes from the names themselves,
+so no word list has to be kept by hand.
 
-A query word matches a name word when it is:
-  - equal                                  (``bajaj`` ↔ ``bajaj``)
-  - the name's acronym                     (``tcs`` ↔ Tata Consultancy Services)
-  - a prefix of ≥4 letters, either way      (``auto`` ↔ ``automobile``)
-  - a shared stem of ≥5 letters             (``automotive`` ↔ ``automobile``)
-  - a close spelling, ≥5 letters            (``bajai`` ↔ ``bajaj``, ``grindell`` ↔ ``grindwell``)
+A question word matches a name word when it is:
+  - the same word                      (``bajaj`` and ``bajaj``)
+  - the name's short form              (``tcs`` for Tata Consultancy Services, ``l&t``)
+  - the start of it, 4+ letters        (``auto`` and ``automobile``)
+  - the same first 5+ letters          (``automotive`` and ``automobile``)
+  - a near spelling, 5+ letters        (``bajai`` and ``bajaj``, ``grindell`` and ``grindwell``)
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -32,10 +33,15 @@ _NOISE = {
     "the", "of", "and", "a", "an", "in", "for", "to", "by", "on", "with", "at", "is",
 }  # fmt: skip
 _WORD = re.compile(r"[a-z0-9]+")
+_AMPERSAND_ACRONYM = re.compile(r"\b[a-z](?:\s*&\s*[a-z])+\b")  # "l&t", "m & m"
+_ACRONYM_BONUS = 3.0
+
+# Match quality of a question word against a name word.
+_EQUAL, _PREFIX, _STEM, _SPELLING = 1.0, 0.8, 0.7, 0.6
 
 
 def tokens(text: str) -> list[str]:
-    """Lower-case alphanumeric words, ``&`` read as ``and``, noise words dropped."""
+    """Lower-case words, ``&`` read as ``and``, noise words dropped."""
     return [t for t in _WORD.findall(text.lower().replace("&", " and ")) if t not in _NOISE]
 
 
@@ -45,33 +51,20 @@ def acronym(text: str) -> str:
     return "".join(w[0] for w in words) if len(words) >= 2 else ""
 
 
-def _norm_name(name: str) -> str:
-    return " ".join(name.lower().split())
-
-
 def kind_words(kinds: list[str]) -> set[str]:
-    """The configured type names and their plurals — "sector", "companies" name no entity."""
-    out: set[str] = set()
-    for k in kinds:
-        for w in _WORD.findall(k.lower()):
-            out |= {w, w + "s", w + "es"}
+    """The type names and their plurals ("sector", "companies") — they name no entity."""
+    words = set()
+    for kind in kinds:
+        for w in _WORD.findall(kind.lower()):
+            words |= {w, w + "s", w + "es"}
             if w.endswith("y"):
-                out.add(w[:-1] + "ies")
-    return out
-
-
-def _common_prefix(a: str, b: str) -> int:
-    n = 0
-    for x, y in zip(a, b, strict=False):
-        if x != y:
-            break
-        n += 1
-    return n
+                words.add(w[:-1] + "ies")
+    return words
 
 
 @dataclass
 class NameEntry:
-    """One entity in the catalog: kind, key, display name, attributes."""
+    """One entity in the catalog."""
 
     kind: str
     key: str
@@ -81,105 +74,113 @@ class NameEntry:
     initials: str = ""
 
 
-class NameMatcher:
-    """Score entity names against a question; build once per index version."""
+def build_matcher(entries: list[NameEntry]) -> dict:
+    """Look-up tables for name matching, built once per index version.
 
-    def __init__(self, entries: list[NameEntry]):
-        """Index ``entries`` by word (IDF is computed from the names themselves)."""
-        self.entries = entries
-        self._by_word: dict[str, list[int]] = defaultdict(list)
-        for i, e in enumerate(entries):
-            e.words = tuple(dict.fromkeys(tokens(e.name)))
-            e.initials = acronym(e.name)
-            for w in e.words:
-                self._by_word[w].append(i)
-        n = max(1, len(entries))
-        self._idf = {w: math.log(1 + n / len(ix)) for w, ix in self._by_word.items()}
-        self._vocab_by_first: dict[str, list[str]] = defaultdict(list)
-        for w in self._by_word:
-            self._vocab_by_first[w[0]].append(w)
-        self._by_initials: dict[str, list[int]] = defaultdict(list)
-        for i, e in enumerate(entries):
-            if len(e.initials) >= 2:
-                self._by_initials[e.initials].append(i)
-        self._by_name: dict[str, list[NameEntry]] = defaultdict(list)
-        for e in entries:
-            self._by_name[_norm_name(e.name)].append(e)
+    Keys: entries, by_word, by_initials, by_name, idf (word weight), by_first_letter.
+    """
+    by_word: dict[str, list[int]] = defaultdict(list)
+    by_initials: dict[str, list[int]] = defaultdict(list)
+    by_name: dict[str, list[NameEntry]] = defaultdict(list)
+    for i, e in enumerate(entries):
+        e.words = tuple(dict.fromkeys(tokens(e.name)))
+        e.initials = acronym(e.name)
+        for w in e.words:
+            by_word[w].append(i)
+        if len(e.initials) >= 2:
+            by_initials[e.initials].append(i)
+        by_name[" ".join(e.name.lower().split())].append(e)
 
-    def exact(self, name: str) -> list[NameEntry]:
-        """Entities whose full name equals ``name`` (case and spacing ignored)."""
-        return list(self._by_name.get(_norm_name(name), ()))
+    total = max(1, len(entries))
+    by_first_letter: dict[str, list[str]] = defaultdict(list)
+    for w in by_word:
+        by_first_letter[w[0]].append(w)
+    return {
+        "entries": entries,
+        "by_word": by_word,
+        "by_initials": by_initials,
+        "by_name": by_name,
+        "idf": {w: math.log(1 + total / len(ids)) for w, ids in by_word.items()},  # rare words weigh more
+        "by_first_letter": by_first_letter,
+    }
 
-    @classmethod
-    def from_catalog(cls, catalog: dict) -> NameMatcher:
-        """Build from the ``names`` JSON written by the index build."""
-        return cls(
-            [
-                NameEntry(kind=str(e[0]), key=str(e[1]), name=str(e[2]), attrs=dict(e[3]) if len(e) > 3 else {})
-                for e in catalog.get("entities", [])
-            ]
-        )
 
-    def _word_matches(self, q: str) -> list[tuple[str, float]]:
-        """Name words matching query word ``q``, each with a match-quality factor."""
-        out: dict[str, float] = {}
-        if q in self._by_word:
-            out[q] = 1.0
-        for w in self._vocab_by_first.get(q[0], ()):
+def matcher_from_catalog(catalog: dict) -> dict:
+    """Build the matcher from the name list the index build saves: [kind, key, name, attrs] per entity."""
+    entries = [
+        NameEntry(kind=str(e[0]), key=str(e[1]), name=str(e[2]), attrs=dict(e[3]) if len(e) > 3 else {})
+        for e in catalog.get("entities", [])
+    ]
+    return build_matcher(entries)
+
+
+def exact(m: dict, name: str) -> list[NameEntry]:
+    """Entities whose full name equals ``name`` (case and spacing ignored)."""
+    return list(m["by_name"].get(" ".join(name.lower().split()), ()))
+
+
+def match(m: dict, query: str, top_k: dict[str, int]) -> list[tuple[NameEntry, float]]:
+    """Best-matching entities per kind (``top_k`` = {kind: how many}), best first.
+
+    For each word of the question, an entity gets the weight of its best
+    matching word (match quality x word weight); the weights are added up and
+    then scaled by how much of the name was matched. So "norton" ranks
+    Grindwell Norton (1 of 2 words) above a long name that only shares one word.
+    """
+    scores: dict[int, float] = defaultdict(float)
+    matched: dict[int, set[str]] = defaultdict(set)
+
+    def acronym_score(i: int) -> float:
+        return _ACRONYM_BONUS + max((m["idf"][w] for w in m["entries"][i].words), default=0)
+
+    for letters in _AMPERSAND_ACRONYM.findall(query.lower()):
+        for i in m["by_initials"].get(re.sub(r"[\s&]", "", letters), ()):
+            scores[i] += acronym_score(i)
+            matched[i].update(m["entries"][i].words)
+
+    skip = kind_words(list(top_k))
+    for q in dict.fromkeys(tokens(query)):
+        if len(q) < 2 or q in skip:
+            continue
+        # Name words matching q, with their match quality.
+        qualities = {q: _EQUAL} if q in m["by_word"] else {}
+        for w in m["by_first_letter"].get(q[0], ()):
             if w == q:
                 continue
             if len(q) >= 4 and len(w) >= 4 and (w.startswith(q) or q.startswith(w)):
-                out[w] = max(out.get(w, 0), 0.8)
-            elif len(q) >= 5 and len(w) >= 5 and _common_prefix(q, w) >= 5:
-                out[w] = max(out.get(w, 0), 0.7)
+                quality = _PREFIX
+            elif len(q) >= 5 and len(w) >= 5 and len(os.path.commonprefix([q, w])) >= 5:
+                quality = _STEM
             elif len(q) >= 5 and abs(len(q) - len(w)) <= 2 and SequenceMatcher(None, q, w).ratio() >= 0.8:
-                out[w] = max(out.get(w, 0), 0.6)
-        return list(out.items())
-
-    def match(self, query: str, top_k: dict[str, int]) -> list[tuple[NameEntry, float]]:
-        """Best-matching entities per kind (``top_k`` = {kind: limit}), best first.
-
-        A name's score is the IDF-weighted sum of its best word match per query
-        word, scaled by how much of the name the question covers — so
-        "norton" ranks Grindwell Norton (1 of 2 words) above a long index name
-        that happens to share one word.
-        """
-        skip = kind_words(list(top_k))
-        scores: dict[int, float] = defaultdict(float)
-        matched_words: dict[int, set[str]] = defaultdict(set)
-        # "L&T", "M&M": letters joined by "&" are an acronym ("lt", "mm").
-        for amp in re.findall(r"\b[a-z](?:\s*&\s*[a-z])+\b", query.lower()):
-            for i in self._by_initials.get(re.sub(r"[\s&]", "", amp), ()):
-                scores[i] += 3.0 + max((self._idf[w] for w in self.entries[i].words), default=0)
-                matched_words[i].update(self.entries[i].words)
-        for q in dict.fromkeys(tokens(query)):
-            if len(q) < 2 or q in skip:
+                quality = _SPELLING
+            else:
                 continue
-            best: dict[int, float] = {}
-            for w, quality in self._word_matches(q):
-                weight = quality * self._idf[w]
-                for i in self._by_word[w]:
-                    if weight > best.get(i, 0.0):
-                        best[i] = weight
-                    matched_words[i].add(w)
-            if len(q) >= 2:
-                for i in self._by_initials.get(q, ()):
-                    # An acronym names the whole entity, so it covers every word.
-                    best[i] = max(best.get(i, 0.0), 3.0 + max((self._idf[w] for w in self.entries[i].words), default=0))
-                    matched_words[i].update(self.entries[i].words)
-            for i, v in best.items():
-                scores[i] += v
+            qualities[w] = max(qualities.get(w, 0), quality)
 
-        by_kind: dict[str, list[tuple[NameEntry, float]]] = defaultdict(list)
-        for i, s in scores.items():
-            e = self.entries[i]
-            coverage = len(matched_words[i]) / max(1, len(e.words)) if e.words else 1.0
-            by_kind[e.kind].append((e, s * (0.5 + 0.5 * min(1.0, coverage))))
-        out: list[tuple[NameEntry, float]] = []
-        for kind, items in by_kind.items():
-            if kind not in top_k:
-                continue
-            items.sort(key=lambda x: (-x[1], len(x[0].name)))
-            floor = max(0.3, 0.5 * items[0][1])
-            out += [x for x in items if x[1] >= floor][: top_k[kind]]
-        return out
+        best: dict[int, float] = {}
+        for w, quality in qualities.items():
+            weight = quality * m["idf"][w]
+            for i in m["by_word"][w]:
+                best[i] = max(best.get(i, 0.0), weight)
+                matched[i].add(w)
+        for i in m["by_initials"].get(q, ()):
+            best[i] = max(best.get(i, 0.0), acronym_score(i))
+            matched[i].update(m["entries"][i].words)  # an acronym names the whole entity
+        for i, weight in best.items():
+            scores[i] += weight
+
+    # Scale by name coverage, then keep each kind's best (within half the top score).
+    by_kind: dict[str, list[tuple[NameEntry, float]]] = defaultdict(list)
+    for i, score in scores.items():
+        e = m["entries"][i]
+        coverage = len(matched[i]) / len(e.words) if e.words else 1.0
+        by_kind[e.kind].append((e, score * (0.5 + 0.5 * min(1.0, coverage))))
+
+    result: list[tuple[NameEntry, float]] = []
+    for kind, items in by_kind.items():
+        if kind not in top_k:
+            continue
+        items.sort(key=lambda item: (-item[1], len(item[0].name)))
+        floor = max(0.3, 0.5 * items[0][1])
+        result += [item for item in items if item[1] >= floor][: top_k[kind]]
+    return result

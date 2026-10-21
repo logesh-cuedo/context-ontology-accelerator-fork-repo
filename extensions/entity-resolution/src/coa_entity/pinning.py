@@ -1,17 +1,16 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pin a governed metric's table into the NL→SQL schema context.
+"""Make sure a governed metric's own table is in the tables Tier 2 sees.
 
-When Tier 1 matches a governed metric but declines it (the question adds a
-filter such as a sector or a fiscal year), serve forwards the metric's SQL to
-Tier 2 as authoritative. But Tier 2 picks its schema context by similarity
-alone, so in a namespace with many look-alike tables the metric's own table can
-be missing from what the SQL writer sees — it then "extends" the definition on a
-different table. :func:`pin_tables` adds the metric's table(s) to the retrieved
-classes when similarity missed them.
+When Tier 1 finds a governed metric but does not answer (the question adds a
+filter such as a sector or a fiscal year), serve passes the metric's SQL on to
+Tier 2. Tier 2 picks its tables only by similarity, so when many tables look
+alike, the metric's own table can be left out, and the SQL then uses a different
+table. pin_tables() adds the metric's table(s) when the similarity search
+missed them.
 
-Called from serve's sql_generator through a guarded ``cuedo-ext`` hook.
+Called from serve's sql_generator through a ``cuedo-ext`` hook.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ _TABLE_REF = re.compile(
 
 
 def metric_tables(sql: str) -> list[str]:
-    """Bare table names a metric's SQL reads (``FROM``/``JOIN``), qualifiers and quotes dropped."""
+    """Table names a metric's SQL reads (after ``FROM`` / ``JOIN``), without database prefix or quotes."""
     out: list[str] = []
     for ref in _TABLE_REF.findall(sql or ""):
         name = ref.split(".")[-1].strip().strip('"')
@@ -50,11 +49,11 @@ async def pin_tables(
     index: str,
     require_mapped: bool,
 ) -> list[Any]:
-    """``hits`` with a class hit for every table in ``tables`` (pinned ones first).
+    """``hits`` plus a hit for every table in ``tables`` (those first).
 
-    Each missing table is looked up by a similarity search on its own name and
-    kept only on an exact table-name match, so nothing unrelated is added.
-    Best-effort: a lookup failure leaves ``hits`` unchanged.
+    Each missing table is found by a search on its own name, and kept only if
+    the table name matches exactly, so nothing unrelated is added. If the search
+    fails, ``hits`` is returned unchanged.
     """
     have = {(table_of(getattr(h, "text", "")) or "").lower() for h in hits}
     pinned: list[Any] = []

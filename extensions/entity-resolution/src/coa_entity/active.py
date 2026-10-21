@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The active-index pointer: which index version serve searches, and its name list.
+"""The pointer that tells serve which index version to search, and where its name list is.
 
     SSM {ssm_prefix}/entities/_active/{namespace}
         {"index": "<collection>-entities-<ns>-v<version>",
@@ -46,7 +46,7 @@ def read_pointer(ssm: Any, ssm_prefix: str, namespace: str) -> ActivePointer | N
 
 
 def write_pointer(ssm: Any, ssm_prefix: str, namespace: str, pointer: ActivePointer) -> None:
-    """Publish ``pointer`` as the namespace's active index version."""
+    """Save ``pointer`` as the index version serve should search."""
     ssm.put_parameter(
         Name=pointer_name(ssm_prefix, namespace),
         Value=json.dumps({"index": pointer.index, "names": pointer.names_uri, "version": pointer.version}),
@@ -56,6 +56,6 @@ def write_pointer(ssm: Any, ssm_prefix: str, namespace: str, pointer: ActivePoin
 
 
 def delete_pointer(ssm: Any, ssm_prefix: str, namespace: str) -> None:
-    """Remove the namespace's pointer (namespace deleted)."""
+    """Remove the namespace's pointer (used when a namespace is deleted)."""
     with contextlib.suppress(ssm.exceptions.ParameterNotFound):
         ssm.delete_parameter(Name=pointer_name(ssm_prefix, namespace))

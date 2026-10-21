@@ -1,22 +1,21 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Entity-index Lambda: build on ontology publish, sweep orphans daily.
+"""Entity-index Lambda: rebuild when an ontology is published, clean up old indexes daily.
 
 Events:
   ``ontology.published`` (EventBridge)   rebuild that namespace's entity index
-  ``Scheduled Event`` (EventBridge)      delete entity indexes of deleted namespaces
+  ``Scheduled Event`` (EventBridge)      delete indexes of deleted namespaces
   ``{"action": "build", "namespace": …}`` manual rebuild
-  ``{"action": "sweep"}``                 manual sweep
+  ``{"action": "sweep"}``                 manual clean-up
 
-Build: the namespace's EntityConfig (SSM, see coa_entity.config) names the
-tables. For each entity type the table is looked up in the namespace's native
-Glue database sources (or the ``database`` the config pins), read through the
-namespace's Athena workgroup, embedded and written to
-``{collection}-entities-{namespace}``.
+Build: the namespace's entity config (in SSM, see config.py) names the tables.
+Each table is looked up in the namespace's Glue databases (or the ``database``
+set in the config), read through the namespace's Athena workgroup, turned into
+vectors and saved to ``{collection}-entities-{namespace}``.
 
-Fail-open: no config, a missing table/column, or an Athena/Lake Formation denial
-is logged and skipped — serve then falls back to its LIKE filter rules.
+If there is no config, a table or column is missing, or Athena / Lake Formation
+says no, it is logged and skipped. Serve then uses its general LIKE filter rules.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ def _region() -> str:
 
 
 def source_databases(dynamodb: Any, namespace: str) -> list[str]:
-    """Native Glue database names registered to ``namespace``, in source order."""
+    """The Glue database names added as sources to ``namespace``, in order."""
     table = dynamodb.Table(_env("DATA_SOURCES_TABLE"))
     items: list[dict[str, Any]] = []
     kwargs: dict[str, Any] = {
@@ -71,7 +70,7 @@ def source_databases(dynamodb: Any, namespace: str) -> list[str]:
 
     databases: list[str] = []
     for item in items:
-        # Federated sources sit behind a connector; entity tables are native Glue tables.
+        # Skip sources behind a connector; entity tables must be plain Glue tables.
         if item.get("sourceType") != _SOURCE_TYPE_DATABASE or item.get("athenaDataCatalogName"):
             continue
         raw = item.get("configuration") or "{}"
@@ -93,7 +92,7 @@ def find_database(glue: Any, databases: list[str], spec: EntityTypeSpec) -> str 
             meta = glue.get_table(DatabaseName=database, Name=spec.table)["Table"]
         except glue.exceptions.EntityNotFoundException:
             continue
-        except Exception as exc:  # AccessDenied (strict Lake Formation) and friends
+        except Exception as exc:  # e.g. AccessDenied from Lake Formation
             logger.warning("entity_table_lookup_failed", database=database, table=spec.table, error=str(exc)[:200])
             continue
         present = {c["Name"].lower() for c in meta.get("StorageDescriptor", {}).get("Columns", [])}
@@ -107,7 +106,7 @@ def find_database(glue: Any, databases: list[str], spec: EntityTypeSpec) -> str 
 
 
 def workgroup(dynamodb: Any, namespace: str) -> str:
-    """The namespace's Athena workgroup (namespaces table), else the deployment's naming convention."""
+    """The namespace's Athena workgroup (from the namespaces table), else the default name."""
     try:
         item = (
             dynamodb.Table(_env("NAMESPACES_TABLE"))
@@ -119,12 +118,6 @@ def workgroup(dynamodb: Any, namespace: str) -> str:
     except Exception as exc:
         logger.warning("entity_workgroup_lookup_failed", namespace=namespace, error=str(exc)[:200])
     return f"{_env('ATHENA_WORKGROUP_PREFIX')}{namespace}"
-
-
-def _embed_model_id(ssm: Any) -> str:
-    """Serve's embedding model — the index MUST use the same one as query embedding."""
-    raw = ssm.get_parameter(Name=f"{_env('SSM_PREFIX')}/config")["Parameter"]["Value"]
-    return json.loads(raw).get("bedrockEmbedModelId") or ""
 
 
 def build(namespace: str) -> dict[str, Any]:
@@ -159,8 +152,8 @@ def build(namespace: str) -> dict[str, Any]:
     try:
         docs, counts = build_all_documents(config, read)
     except Exception as exc:
-        # Typically a Lake Formation denial in strict-LF accounts: this role needs
-        # SELECT on the entity tables, granted outside COA. Skip, don't retry.
+        # Usually Lake Formation saying no: this role needs SELECT on the entity
+        # tables, which is granted outside COA. Skip, don't retry.
         logger.warning("entity_index_read_failed", namespace=namespace, error=str(exc)[:300])
         return {"status": "skipped", "reason": "could not read the entity tables"}
     if not docs:
@@ -169,7 +162,9 @@ def build(namespace: str) -> dict[str, Any]:
     from coa_common.embeddings import BedrockEmbedder
     from coa_common.opensearch.client import AossVectorClient
 
-    model_id = _embed_model_id(ssm)
+    # Serve's embedding model. The index MUST use the same one serve uses for questions.
+    serve_config = json.loads(ssm.get_parameter(Name=f"{_env('SSM_PREFIX')}/config")["Parameter"]["Value"])
+    model_id = serve_config.get("bedrockEmbedModelId") or ""
     embedder = BedrockEmbedder(
         model_id=model_id or None, region=region, max_workers=int(_env("EMBED_MAX_WORKERS", "16"))
     )
@@ -177,8 +172,8 @@ def build(namespace: str) -> dict[str, Any]:
     collection = _env("OSS_COLLECTION_NAME")
     version = int(time.time())
     index = versioned_index_name(collection, namespace, version)
-    # Write a NEW version, then its name list, then switch the pointer — serve
-    # keeps searching the previous version until the new one is complete.
+    # Write a NEW version, then its name list, then move the pointer. Serve keeps
+    # searching the previous version until the new one is complete.
     written = write_index(
         docs, embedder=embedder, aoss=aoss, index=index, namespace=namespace, embed_model_id=model_id, recreate=False
     )
@@ -193,18 +188,9 @@ def build(namespace: str) -> dict[str, Any]:
         namespace,
         ActivePointer(index=index, names_uri=f"s3://{bucket}/{key}", version=version),
     )
-    _retire(aoss, s3, bucket, collection, namespace, previous)
-    logger.info(
-        "entity_index_built", namespace=namespace, index=index, documents=written, by_type=counts, missing=missing
-    )
-    return {"status": "built", "index": index, "documents": written, "by_type": counts, "missing_types": missing}
 
-
-def _retire(aoss: Any, s3: Any, bucket: str, collection: str, namespace: str, previous: ActivePointer | None) -> None:
-    """Drop the version the pointer just moved off, and the pre-versioning index. Best-effort."""
-    stale = [index_name(collection, namespace)]
-    if previous is not None:
-        stale.append(previous.index)
+    # Delete the previous version and the old unversioned index. Errors are only logged.
+    stale = [index_name(collection, namespace)] + ([previous.index] if previous is not None else [])
     for idx in stale:
         try:
             aoss.delete_index(idx)
@@ -216,16 +202,21 @@ def _retire(aoss: Any, s3: Any, bucket: str, collection: str, namespace: str, pr
         except Exception as exc:
             logger.warning("entity_names_retire_failed", uri=previous.names_uri, error=str(exc)[:200])
 
+    logger.info(
+        "entity_index_built", namespace=namespace, index=index, documents=written, by_type=counts, missing=missing
+    )
+    return {"status": "built", "index": index, "documents": written, "by_type": counts, "missing_types": missing}
 
-_STALE_AFTER_S = 2 * 3600  # an unpointed version younger than this may be a build in progress
+
+_STALE_AFTER_S = 2 * 3600  # a version not in use and younger than this may still be building
 
 
 def sweep() -> dict[str, Any]:
-    """Delete entity indexes (and pointers / name lists) no namespace still uses.
+    """Delete entity indexes (and pointers / name lists) that are no longer used.
 
-    Removes every index of a deleted namespace, and any version of a live
-    namespace that is not the active one and older than two hours (a failed or
-    superseded build).
+    Removes every index of a deleted namespace, and any old version of a live
+    namespace that is not the one in use and is more than two hours old (a
+    failed or replaced build).
     """
     from coa_common.opensearch.client import AossVectorClient
 
@@ -259,17 +250,17 @@ def sweep() -> dict[str, Any]:
             active[namespace] = read_pointer(ssm, _env("SSM_PREFIX"), namespace) if exists[namespace] else None
         pointer = active[namespace]
         if not exists[namespace]:
-            stale = True
+            stale = True  # its namespace was deleted
         elif pointer is not None and index == pointer.index:
-            stale = False
+            stale = False  # the version in use
         elif version is None:
-            stale = pointer is not None  # legacy index superseded by a versioned build
+            stale = pointer is not None  # old unversioned index, replaced by a versioned one
         else:
             stale = now - version > _STALE_AFTER_S and (pointer is None or version < pointer.version)
         if stale and aoss.delete_index(index):
             deleted.append(index)
     for namespace, alive in exists.items():
-        if not alive:
+        if not alive:  # a deleted namespace: drop its pointer and name lists too
             delete_pointer(ssm, _env("SSM_PREFIX"), namespace)
             if bucket:
                 for obj in s3.list_objects_v2(Bucket=bucket, Prefix=f"entities/{namespace}/").get("Contents", []):
@@ -279,7 +270,7 @@ def sweep() -> dict[str, Any]:
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Dispatch an EventBridge event or a manual ``{"action": ...}`` invoke."""
+    """Handle an EventBridge event or a manual ``{"action": ...}`` call."""
     action = event.get("action")
     detail_type = event.get("detail-type")
     if action == "sweep" or detail_type == "Scheduled Event":
