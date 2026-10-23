@@ -81,9 +81,21 @@ export class OIDCProvider {
     return instance;
   }
 
-  /** Initiates the OIDC login redirect to the identity provider. */
-  async authenticate(): Promise<void> {
-    await this.userManager.signinRedirect();
+  /**
+   * Initiates the OIDC login redirect to the identity provider.
+   *
+   * @param identityProvider Name of a federated provider registered on the
+   *   user pool (e.g. `"Microsoft"`). Passing it sends the user straight to
+   *   that provider, skipping the Cognito hosted UI's own provider picker.
+   *   Omit it to land on the hosted UI, which lists every enabled provider
+   *   alongside the username/password form.
+   */
+  async authenticate(identityProvider?: string): Promise<void> {
+    await this.userManager.signinRedirect(
+      identityProvider
+        ? { extraQueryParams: { identity_provider: identityProvider } }
+        : undefined,
+    );
   }
 
   async authenticationCallback(url?: string): Promise<User | undefined> {

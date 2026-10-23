@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from coa_common.auth.token_authorizer import TokenAuthorizer
+from coa_common.auth.token_authorizer import (
+    FEDERATED_GROUP_CLAIM,
+    TokenAuthorizer,
+    merge_group_claims,
+)
 
 
 class CognitoTokenAuthorizer(TokenAuthorizer):
@@ -48,5 +52,11 @@ class CognitoTokenAuthorizer(TokenAuthorizer):
         return str(claims.get("email") or claims.get("username", ""))
 
     def _extract_groups(self, claims: dict[str, Any]) -> list[str]:
-        groups = claims.get("cognito:groups", [])
-        return list(groups) if isinstance(groups, list) else []
+        """Merge the pool's own groups with those a federated user brings.
+
+        Native users carry ``cognito:groups``; users federated from an external
+        IdP carry ``FEDERATED_GROUP_CLAIM`` instead and have no Cognito group
+        at all. Reading both means neither kind needs a manual group assignment
+        before their grants resolve.
+        """
+        return merge_group_claims(claims, "cognito:groups", FEDERATED_GROUP_CLAIM)

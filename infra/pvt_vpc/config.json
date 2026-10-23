@@ -23,17 +23,17 @@
     ]
   },
   "securityGroups": {
-    "lambda": "sg-08f3a1b1e0cff32ea",
-    "ecs": "sg-04ba8c42d006bf9e2",
-    "neptune": "sg-0157672949dc56354",
-    "aossVpce": "sg-0e0706ddb64325436",
-    "connector": "sg-00aa83f513af737d9",
-    "discoveryOcsp": "sg-0a0ab10bf0e61964f",
-    "agentCore": "sg-0d84c5aa1f4c82bc1",
-    "mcp": "sg-071ac95da9c3664a1"
+    "lambda": "sg-0a69b41dbcda6b488",
+    "ecs": "sg-0f77f0c4fe248e755",
+    "neptune": "sg-07c147a3937e4064a",
+    "aossVpce": "sg-044ef16021323ea89",
+    "connector": "sg-0a1fb4cadaaa07210",
+    "discoveryOcsp": "sg-044f860ad970bdc17",
+    "agentCore": "sg-03e1444a201251204",
+    "mcp": "sg-0d7b907cf0a9be329"
   },
   "vpcEndpoints": {
-    "aossData": "vpce-0f560c938c358de3e"
+    "aossData": "vpce-01f5e9d2e9f72bf2b"
   },
   "_4": "Optional, and read in BOTH flows. Resources you already run, to reuse instead of create. Leave a block entirely blank and the deployment creates its own, as it always has. Fill a block in and it creates none of those resources and uses yours.",
   "existing": {

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import jwt
 import structlog
-from coa_common.auth.token_authorizer import extract_groups_claim
+from coa_common.auth.token_authorizer import FEDERATED_GROUP_CLAIM, merge_group_claims
 
 logger = structlog.get_logger(__name__)
 
@@ -76,6 +76,6 @@ class TokenClaims:
         # groups feed Cedar namespace authorization. Parsing is the
         # shared libs/common helper so IdP claim-shape handling has exactly one
         # implementation across the control-plane authorizer and serve.
-        groups = extract_groups_claim(claims, _GROUP_CLAIM_NAME)
+        groups = merge_group_claims(claims, _GROUP_CLAIM_NAME, FEDERATED_GROUP_CLAIM)
 
         return cls(user_id=sub, email=str(claims.get("email", "")), groups=groups)

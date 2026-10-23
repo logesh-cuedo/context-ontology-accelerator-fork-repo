@@ -52,6 +52,51 @@ export const DEFAULT_CALLBACK_URLS = ["https://localhost/authenticate/"];
 export const DEFAULT_LOGOUT_URLS = ["https://localhost/"];
 export const DEFAULT_GROUP_CLAIM = "cognito:groups";
 
+/**
+ * User-pool custom attribute holding a federated user's IdP groups, which
+ * Cognito does not merge into `cognito:groups`. Cognito mints it as the claim
+ * `custom:idp_groups`; the authorizers read that name from
+ * `FEDERATED_GROUP_CLAIM` in libs/common's token_authorizer.py, so the two
+ * must agree or a federated user resolves no roles at all.
+ *
+ * Bare here, without the `custom:` prefix: CDK's `customAttributes` and the
+ * `custom` bag of an attribute mapping both add it.
+ */
+export const FEDERATED_GROUP_ATTRIBUTE = "idp_groups";
+
+// ── Microsoft Entra ID federation ──────────────────────────────────
+/**
+ * Provider name registered on the user pool. The web app sends it as the
+ * `identity_provider` query parameter to skip the hosted UI's picker, so it
+ * must match there too (see MICROSOFT_IDP_NAME in the web app's LoginPage) —
+ * Cognito rejects an unknown name at the authorize endpoint rather than
+ * falling back to the picker.
+ */
+export const MICROSOFT_IDP_NAME = "Microsoft";
+
+/** Application (client) ID of the Entra ID app registration. */
+export const MICROSOFT_CLIENT_ID = "93542888-7523-463e-8fa7-8b67e8c22784";
+
+/** Directory (tenant) ID of the Entra ID app registration. */
+export const MICROSOFT_TENANT_ID = "9c96b8bd-618e-49b2-bda6-dc4368ba467a";
+
+/**
+ * Entra ID issuer, pinned to the tenant.
+ *
+ * NOT `/common`, however multi-tenant the app registration is. Cognito
+ * compares the token's `iss` claim to this string LITERALLY, and `/common`
+ * advertises `https://login.microsoftonline.com/{tenantid}/v2.0` — a
+ * placeholder. Every real token carries the signing tenant's GUID, which
+ * never equals "common", so validation fails, no federated user is created,
+ * and the hosted UI redirects back to the login page with no error. That is
+ * the failure this constant exists to avoid; it is silent on both sides.
+ *
+ * The cost is that sign-in is restricted to this one tenant. Admitting
+ * another means a second OIDC provider for that tenant's issuer, not a
+ * wildcard here.
+ */
+export const MICROSOFT_ISSUER_URL = `https://login.microsoftonline.com/${MICROSOFT_TENANT_ID}/v2.0`;
+
 /** Default initial Cognito user attributes. */
 export const DEFAULT_ADMIN_USERNAME = "nobody@amazon.com";
 export const DEFAULT_ADMIN_GROUP = "Admin";

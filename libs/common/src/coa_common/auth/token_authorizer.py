@@ -22,6 +22,19 @@ logger = structlog.get_logger(__name__)
 _HTTP_TIMEOUT = 30
 
 
+#: Claim carrying the groups a FEDERATED user brings from their own IdP.
+#:
+#: A user who signs in through a provider federated into the Cognito pool
+#: (Entra ID, say) has no Cognito group membership — ``cognito:groups`` is
+#: empty for them, because Cognito does not translate an external IdP's groups
+#: into its own. The pool maps the IdP's group claim onto this custom
+#: attribute instead (see the provider's ``attributeMapping`` in
+#: infra/lib/stacks/foundation/idp-authentication-stack.ts), and Cognito then
+#: mints it as a claim of this name. Reading it alongside ``cognito:groups``
+#: is what lets a federated and a native user resolve roles identically.
+FEDERATED_GROUP_CLAIM = "custom:idp_groups"
+
+
 def extract_groups_claim(claims: dict[str, Any], group_claim_name: str = "groups") -> list[str]:
     """Normalize an IdP groups claim to list[str] (shared identity extraction).
 
@@ -35,6 +48,19 @@ def extract_groups_claim(claims: dict[str, Any], group_claim_name: str = "groups
     if isinstance(raw, str):
         return [g for g in raw.replace(",", " ").split() if g]
     return []
+
+
+def merge_group_claims(claims: dict[str, Any], *claim_names: str) -> list[str]:
+    """Collect groups from several claims, de-duplicated, order preserved.
+
+    Order matters only in that it is stable: a role resolved from either claim
+    is the same role, but a caller logging or caching the list should not see
+    it reshuffle between tokens.
+    """
+    merged: list[str] = []
+    for name in claim_names:
+        merged.extend(extract_groups_claim(claims, name))
+    return list(dict.fromkeys(merged))
 
 
 class TokenType(StrEnum):

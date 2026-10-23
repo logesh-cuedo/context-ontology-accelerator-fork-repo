@@ -37,9 +37,24 @@ export const AuthenticatePage: React.FC<AuthenticatePageProps> = ({
     if (called.current || !provider) return;
     called.current = true;
 
+    // The IdP reports its own failures here rather than in `code`/`state`,
+    // so read them before treating a missing code as a malformed callback.
+    const idpError = searchParams.get("error");
+    if (idpError) {
+      console.error(
+        `Sign-in failed at the identity provider: ${idpError}` +
+          ` — ${searchParams.get("error_description") ?? "no description"}`,
+      );
+      setStatus("failure");
+      return;
+    }
+
     const code = searchParams.get("code");
     const state = searchParams.get("state");
     if (!code || !state) {
+      console.error(
+        "Sign-in callback carried neither an authorization code nor an error.",
+      );
       setStatus("failure");
       return;
     }
@@ -47,9 +62,18 @@ export const AuthenticatePage: React.FC<AuthenticatePageProps> = ({
     provider
       .authenticationCallback()
       .then((user) => {
+        if (!user) {
+          console.error("Token exchange returned no user.");
+        }
         setStatus(user ? "success" : "failure");
       })
-      .catch(() => setStatus("failure"));
+      .catch((err: unknown) => {
+        // Logged, not swallowed: without this the page redirects to /login
+        // with no message anywhere, and a misconfigured provider is
+        // indistinguishable from a user who simply cancelled.
+        console.error("Token exchange failed:", err);
+        setStatus("failure");
+      });
   }, [provider, searchParams]);
 
   useEffect(() => {

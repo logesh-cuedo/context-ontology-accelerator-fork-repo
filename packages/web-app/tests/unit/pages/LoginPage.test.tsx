@@ -36,8 +36,12 @@ describe("LoginPage", () => {
     );
 
     expect(screen.getByText("My App")).toBeInTheDocument();
+    // Exact names: /sign in/i also matches "Sign in with Microsoft".
     expect(
-      screen.getByRole("button", { name: /sign in/i }),
+      screen.getByRole("button", { name: "Sign in" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Sign in with Microsoft" }),
     ).toBeInTheDocument();
   });
 
@@ -51,7 +55,26 @@ describe("LoginPage", () => {
       </RuntimeConfigContext.Provider>,
     );
 
-    await user.click(screen.getByRole("button", { name: /sign in/i }));
-    expect(mockAuthenticate).toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(mockAuthenticate).toHaveBeenCalledWith(undefined);
+  });
+
+  it("passes the provider name when signing in with Microsoft", async () => {
+    // The name is what Cognito resolves `identity_provider` by, so it has to
+    // reach authenticate() verbatim — a bare authenticate() would land the
+    // user on the hosted UI's picker instead of Microsoft.
+    mockAuthenticate.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    render(
+      <RuntimeConfigContext.Provider value={runtimeConfig}>
+        <LoginPage title="My App" />
+      </RuntimeConfigContext.Provider>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with Microsoft" }),
+    );
+    expect(mockAuthenticate).toHaveBeenCalledWith("Microsoft");
   });
 });

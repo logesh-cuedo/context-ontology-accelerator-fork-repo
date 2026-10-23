@@ -5,6 +5,10 @@ import * as cdk from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
+import {
+  AZURE_SECRET_CONFIG_PATH,
+  resolveMicrosoftClientSecret,
+} from "../../azure-secret";
 import { SCLStack } from "../../constructs/scl-stack";
 import { UserPoolUser } from "../../constructs/user-pool-user";
 import { resolveContext } from "../../context";
@@ -19,6 +23,10 @@ import {
   DEFAULT_ADMIN_GROUP,
   DEFAULT_ADMIN_EMAIL,
   DEFAULT_ADMIN_ROLE,
+  FEDERATED_GROUP_ATTRIBUTE,
+  MICROSOFT_IDP_NAME,
+  MICROSOFT_CLIENT_ID,
+  MICROSOFT_ISSUER_URL,
 } from "../../constants";
 import {
   IdpType,
@@ -223,7 +231,19 @@ export class IdpAuthenticationStack extends SCLStack {
       },
       featurePlan: cognito.FeaturePlan.ESSENTIALS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      customAttributes: props?.cognitoCustomAttributes,
+      customAttributes: {
+        // Holds the groups a federated user brings from their own IdP, which
+        // Cognito does not merge into `cognito:groups`. Declared
+        // unconditionally, NOT only when a federated provider is configured: a
+        // user pool's schema can be added to but never altered or removed, so
+        // introducing it later to a pool that has one would force a
+        // replacement — new pool id, every existing user gone. Costless while
+        // unused.
+        [FEDERATED_GROUP_ATTRIBUTE]: new cognito.StringAttribute({
+          mutable: true,
+        }),
+        ...props?.cognitoCustomAttributes,
+      },
     });
 
     // Hoisted into a named constant because it is also published to SSM below,
@@ -240,15 +260,25 @@ export class IdpAuthenticationStack extends SCLStack {
     const supportedIdPs: cognito.UserPoolClientIdentityProvider[] = [
       cognito.UserPoolClientIdentityProvider.COGNITO,
     ];
+    // Every federated provider registered below, so each client that names one
+    // in `supportedIdentityProviders` can depend on it explicitly. A client
+    // names its providers by STRING, which creates no CloudFormation reference
+    // and therefore no implicit ordering: without the dependency the stack
+    // creates clients and providers in parallel, and a client that wins the
+    // race fails with "The provider <name> does not exist for User Pool <id>",
+    // rolling back the whole stack.
+    const federatedProviders: Construct[] = [];
 
     for (const samlCfg of props?.samlProviders ?? []) {
       if (!samlCfg.name) throw new Error("SAML provider name is required");
-      new cognito.UserPoolIdentityProviderSaml(this, `Saml-${samlCfg.name}`, {
-        ...samlCfg,
-        userPool: this.userPool,
-        attributeMapping:
-          samlCfg.attributeMapping ?? this.buildAttrMapping(props),
-      });
+      federatedProviders.push(
+        new cognito.UserPoolIdentityProviderSaml(this, `Saml-${samlCfg.name}`, {
+          ...samlCfg,
+          userPool: this.userPool,
+          attributeMapping:
+            samlCfg.attributeMapping ?? this.buildAttrMapping(props),
+        }),
+      );
       supportedIdPs.push(
         cognito.UserPoolClientIdentityProvider.custom(samlCfg.name),
       );
@@ -256,15 +286,80 @@ export class IdpAuthenticationStack extends SCLStack {
 
     for (const oidcCfg of props?.oidcProviders ?? []) {
       if (!oidcCfg.name) throw new Error("OIDC provider name is required");
-      new cognito.UserPoolIdentityProviderOidc(this, `Oidc-${oidcCfg.name}`, {
-        ...oidcCfg,
-        userPool: this.userPool,
-        scopes: oidcCfg.scopes ?? ["openid", "email", "profile"],
-        attributeMapping:
-          oidcCfg.attributeMapping ?? this.buildAttrMapping(props),
-      });
+      federatedProviders.push(
+        new cognito.UserPoolIdentityProviderOidc(this, `Oidc-${oidcCfg.name}`, {
+          ...oidcCfg,
+          userPool: this.userPool,
+          scopes: oidcCfg.scopes ?? ["openid", "email", "profile"],
+          attributeMapping:
+            oidcCfg.attributeMapping ?? this.buildAttrMapping(props),
+        }),
+      );
       supportedIdPs.push(
         cognito.UserPoolClientIdentityProvider.custom(oidcCfg.name),
+      );
+    }
+
+    // ── Microsoft Entra ID federation ──────────────────────────────
+    // Declared here rather than in the SSM config so a deploy provisions it
+    // from the repo, like the user pool itself. Only the client secret is
+    // supplied separately, because it is rotated on Azure's schedule rather
+    // than with any code change: `MICROSOFT_CLIENT_SECRET` if set, otherwise
+    // `infra/azure.secret.config`.
+    //
+    // Absent secret SKIPS the provider rather than failing the synth: the
+    // deploy must stay runnable without it (CI synth, a developer without the
+    // secret to hand), and a half-registered provider — listed on the client
+    // but unable to complete a token exchange — breaks sign-in more obviously
+    // than its absence. The warning is the signal; the hosted UI simply shows
+    // no Microsoft button.
+    const microsoftClientSecret = resolveMicrosoftClientSecret();
+    if (microsoftClientSecret) {
+      const microsoftProvider = new cognito.UserPoolIdentityProviderOidc(
+        this,
+        "Oidc-Microsoft",
+        {
+          userPool: this.userPool,
+          name: MICROSOFT_IDP_NAME,
+          clientId: MICROSOFT_CLIENT_ID,
+          clientSecret: microsoftClientSecret,
+          issuerUrl: MICROSOFT_ISSUER_URL,
+          scopes: ["openid", "email", "profile"],
+          // `email` is a STANDARD attribute, so it is a top-level key here,
+          // not an entry under `custom`. Without it the ID token carries no
+          // email claim, the authorizer falls back to the federated username
+          // (`Microsoft_<object-id>`), and every grant lookup misses.
+          attributeMapping: {
+            email: cognito.ProviderAttribute.other("email"),
+            // Entra's `groups` claim onto the pool attribute the authorizer
+            // reads alongside `cognito:groups`, so a federated user's roles
+            // resolve on first sign-in with no group assigned by hand. Entra
+            // sends group OBJECT IDs, not display names, so the values that
+            // arrive are GUIDs — a claims mapping that grants a role to one
+            // of these groups has to name the GUID.
+            //
+            // Prefixed: CDK passes a `custom` bag's keys through verbatim,
+            // and the pool attribute's name in a mapping is `custom:<name>`.
+            // Mapping the bare name targets an attribute that does not exist
+            // — which CloudFormation accepts, leaving the claim simply never
+            // populated.
+            custom: {
+              [`custom:${FEDERATED_GROUP_ATTRIBUTE}`]:
+                cognito.ProviderAttribute.other("groups"),
+            },
+          },
+        },
+      );
+      federatedProviders.push(microsoftProvider);
+      supportedIdPs.push(
+        cognito.UserPoolClientIdentityProvider.custom(MICROSOFT_IDP_NAME),
+      );
+    } else {
+      cdk.Annotations.of(this).addWarning(
+        "No Entra ID client secret — skipping the Microsoft identity " +
+          "provider. Sign-in with Microsoft will be unavailable until one is " +
+          "supplied and the stack redeployed. Set MICROSOFT_CLIENT_SECRET, or " +
+          `put it in ${AZURE_SECRET_CONFIG_PATH} under "microsoftClientSecret".`,
       );
     }
 
@@ -330,6 +425,18 @@ export class IdpAuthenticationStack extends SCLStack {
 
     this.mcpClientId = this.mcpClient.userPoolClientId;
     this.issuerUrl = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}`;
+
+    // Both clients list every federated provider by name in
+    // `supportedIdentityProviders`. A name is a plain string, not a
+    // CloudFormation reference, so nothing orders the client after the
+    // provider it names — the two are created in parallel and a client that
+    // wins the race fails with "The provider <name> does not exist for User
+    // Pool <id>", taking the stack to ROLLBACK_COMPLETE. Declared after both
+    // clients so neither can be added later and miss it.
+    for (const provider of federatedProviders) {
+      this.userPoolClient.node.addDependency(provider);
+      this.mcpClient.node.addDependency(provider);
+    }
 
     // ── SSM Parameters ─────────────────────────────────────────────
     new ssm.StringParameter(this, "SsmUserPoolId", {
