@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -60,20 +60,20 @@ def _s3() -> MagicMock:
 
 def _hook(
     resolution: EntityResolution, config: dict | None = None, pointer: dict | None = None
-) -> tuple[EntityHook, AsyncMock]:
+) -> tuple[EntityHook, MagicMock]:
     resolve = _RESOLVE["mock"]
     resolve.return_value = resolution
     ssm = _ssm(sample_document() if config is None else config, pointer)
     return EntityHook(None, None, ssm, _s3(), "/cuedo", "coll"), resolve
 
 
-_RESOLVE: dict[str, AsyncMock] = {}
+_RESOLVE: dict[str, MagicMock] = {}
 
 
 @pytest.fixture(autouse=True)
 def _fake_resolve(monkeypatch):
     """Stand in for resolve_entities; tests read its call arguments."""
-    _RESOLVE["mock"] = AsyncMock()
+    _RESOLVE["mock"] = MagicMock()
     monkeypatch.setattr("coa_entity.serve_hook.resolve_entities", _RESOLVE["mock"])
 
 
@@ -170,7 +170,7 @@ class TestOrchestratorHookPoints:
         history = [{"role": "user", "content": "latest pat of bajaj"}, {"role": "assistant", "content": CLARIFY}]
         await orch.resolve(request, conversation_history=history)
         merged = "latest pat of bajaj\nUser clarification: Bajaj Auto Ltd. (Automobile)"
-        assert resolver.call_args.args[2] == merged
+        assert resolver.call_args.args[1] == merged
         assert request.query == merged
 
     async def test_without_the_hook_upstream_is_unchanged(self):

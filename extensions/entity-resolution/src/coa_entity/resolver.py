@@ -23,9 +23,9 @@ added to the original question. If the reply is a new question, it is run as one
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -253,9 +253,8 @@ def _numbered(candidates: list[EntityCandidate], offer_all: bool = False) -> str
     return "\n".join(lines)
 
 
-async def resolve_entities(
-    vector_client: Any,
-    llm_client: Any,
+def resolve_entities(
+    clients: Any,
     query: str,
     namespace: str,
     config: EntityConfig,
@@ -265,7 +264,10 @@ async def resolve_entities(
     embedding: list[float] | None = None,
     model_id: str | None = None,
 ) -> EntityResolution:
-    """Find the companies / sectors the question is about. Never raises an error."""
+    """Find the companies / sectors the question is about. Never raises an error.
+
+    ``clients`` is a ``clients.Clients`` (blocking calls): run this in a worker thread.
+    """
     kinds = config.kind_infos()
 
     # 1a. Names that share words with the question.
@@ -274,23 +276,19 @@ async def resolve_entities(
         matches = match(matcher, query, {k.type: _NAME_MATCHES_PER_KIND for k in kinds})
         by_name = [_from_name_entry(e, score) for e, score in matches]
 
-    # 1b. Similarity search for each kind, all at once. Each search is tried twice,
-    #     because OpenSearch can be slow to wake up.
-    async def search(k: KindInfo, vector: list[float]) -> list[Any]:
-        try:
-            return await vector_client.search(
-                vector, namespace=namespace, top_k=k.top_k, index=index, entity_type=k.type
-            )
-        except Exception:
-            await asyncio.sleep(1.5)
-            return await vector_client.search(
-                vector, namespace=namespace, top_k=k.top_k, index=index, entity_type=k.type
-            )
-
+    # 1b. Similarity search for each kind, one after the other. Each search is tried
+    #     twice, because OpenSearch can be slow to wake up.
     vector_hits: dict[str, list[EntityCandidate]] = {}
     try:
-        vector = embedding or await llm_client.embed(query)
-        results = await asyncio.gather(*(search(k, vector) for k in kinds))
+        vector = embedding or clients.embed(query)
+        results = []
+        for k in kinds:
+            try:
+                hits = clients.search(vector, index=index, top_k=k.top_k, entity_type=k.type)
+            except Exception:
+                time.sleep(1.5)
+                hits = clients.search(vector, index=index, top_k=k.top_k, entity_type=k.type)
+            results.append(hits)
     except Exception as exc:
         logger.warning("entity_search_failed", namespace=namespace, error=str(exc)[:200])
         if not by_name:
@@ -345,13 +343,12 @@ async def resolve_entities(
 
     # 2. Ask Bedrock to choose. Its reply should contain one JSON object.
     try:
-        reply = await llm_client.converse(
+        text = clients.converse(
             _selection_prompt(query, candidates, kinds), max_tokens=1500, temperature=0.0, model_id=model_id
         )
     except Exception as exc:
         logger.warning("entity_selection_failed", namespace=namespace, error=str(exc)[:200])
         return EntityResolution(status="skipped", reason="unusable selection reply")
-    text = reply.text or ""
     start, end = text.find("{"), text.rfind("}")
     try:
         choice = json.loads(text[start : end + 1]) if start != -1 and end > start else None

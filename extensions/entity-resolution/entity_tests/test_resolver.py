@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -50,23 +50,20 @@ NAMES = build_matcher(
 
 
 def _resolver(reply: dict | str, company_hits=COMPANY_HITS, sector_hits=SECTOR_HITS, search_error=None):
-    vector = AsyncMock()
+    clients = MagicMock()  # Clients: embed / search / converse, plain calls
 
     def search(*_a, entity_type, **_k):
         if search_error:
             raise search_error
         return {"company": company_hits, "sector": sector_hits}[entity_type]
 
-    vector.search.side_effect = search
-    llm = AsyncMock()
-    llm.converse.return_value = SimpleNamespace(text=reply if isinstance(reply, str) else json.dumps(reply))
-    return (vector, llm), vector, llm
+    clients.search.side_effect = search
+    clients.converse.return_value = reply if isinstance(reply, str) else json.dumps(reply)
+    return clients, clients, clients
 
 
-async def _resolve(clients, query, matcher=None):
-    return await resolve_entities(
-        *clients, query, "ns1", sample_config(), index="ix-v1", matcher=matcher, embedding=[0.1]
-    )
+def _resolve(clients, query, matcher=None):
+    return resolve_entities(clients, query, "ns1", sample_config(), index="ix-v1", matcher=matcher, embedding=[0.1])
 
 
 def _prompt(llm) -> str:
@@ -77,36 +74,36 @@ def _prompt(llm) -> str:
 def _no_retry_sleep(monkeypatch):
     import coa_entity.resolver as r
 
-    monkeypatch.setattr(r.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(r.time, "sleep", lambda _s: None)
 
 
 @pytest.mark.unit
 class TestCandidates:
-    async def test_every_kind_searched_in_the_given_index(self):
+    def test_every_kind_searched_in_the_given_index(self):
         resolver, vector, _ = _resolver({"status": "no_entity"})
-        await _resolve(resolver, "q")
+        _resolve(resolver, "q")
         searched = {c.kwargs["entity_type"]: c.kwargs for c in vector.search.call_args_list}
         assert set(searched) == {"company", "sector"}
         assert searched["company"]["index"] == "ix-v1"
 
-    async def test_name_match_adds_partial_names_vector_search_missed(self):
+    def test_name_match_adds_partial_names_vector_search_missed(self):
         resolver, _, llm = _resolver({"status": "no_entity"}, company_hits=[], sector_hits=[])
-        await _resolve(resolver, "total revenue of norton", matcher=NAMES)
+        _resolve(resolver, "total revenue of norton", matcher=NAMES)
         assert "[company] Grindwell Norton Ltd." in _prompt(llm)
 
-    async def test_name_match_finds_every_sector_for_a_broad_word(self):
+    def test_name_match_finds_every_sector_for_a_broad_word(self):
         resolver, _, llm = _resolver({"status": "no_entity"}, sector_hits=[])
-        await _resolve(resolver, "top 5 by pat in automobile sector", matcher=NAMES)
+        _resolve(resolver, "top 5 by pat in automobile sector", matcher=NAMES)
         prompt = _prompt(llm)
         assert "[sector] Automobile Two & Three Wheelers" in prompt
         assert "[sector] Automobiles - Passenger Cars" in prompt
 
-    async def test_duplicates_from_both_sources_appear_once(self):
+    def test_duplicates_from_both_sources_appear_once(self):
         resolver, _, llm = _resolver({"status": "no_entity"})
-        await _resolve(resolver, "bajaj auto pat", matcher=NAMES)
+        _resolve(resolver, "bajaj auto pat", matcher=NAMES)
         assert _prompt(llm).count("Bajaj Auto Ltd.") == 1
 
-    async def test_cold_search_is_retried_once(self):
+    def test_cold_search_is_retried_once(self):
         resolver, vector, _ = _resolver({"status": "no_entity"})
         calls = {"n": 0}
 
@@ -117,84 +114,84 @@ class TestCandidates:
             return {"company": COMPANY_HITS, "sector": SECTOR_HITS}[entity_type]
 
         vector.search.side_effect = flaky
-        assert (await _resolve(resolver, "q")).status == "no_entity"
+        assert (_resolve(resolver, "q")).status == "no_entity"
 
-    async def test_search_failure_still_resolves_from_names(self):
+    def test_search_failure_still_resolves_from_names(self):
         resolver, _, _ = _resolver({"status": "found", "chosen": ["E1"]}, search_error=RuntimeError("down"))
-        res = await _resolve(resolver, "tcs pat", matcher=NAMES)
+        res = _resolve(resolver, "tcs pat", matcher=NAMES)
         assert res.by_kind() == {"company": ["Tata Consultancy Services Ltd."]}
 
-    async def test_nothing_at_all_is_skipped(self):
+    def test_nothing_at_all_is_skipped(self):
         resolver, _, llm = _resolver({"status": "found"}, company_hits=[], sector_hits=[])
-        res = await _resolve(resolver, "q")
+        res = _resolve(resolver, "q")
         assert res.reason == "entity index empty"
         llm.converse.assert_not_called()
 
 
 @pytest.mark.unit
 class TestOutcomes:
-    async def test_found_company_and_sector(self):
+    def test_found_company_and_sector(self):
         resolver, _, _ = _resolver({"status": "found", "chosen": ["E1", "E3"]})
-        res = await _resolve(resolver, "bajaj auto pat")
+        res = _resolve(resolver, "bajaj auto pat")
         assert res.by_kind() == {"company": ["Bajaj Auto Ltd."], "sector": ["Automobile Two & Three Wheelers"]}
 
-    async def test_ambiguous_companies_get_numbered_options(self):
+    def test_ambiguous_companies_get_numbered_options(self):
         resolver, _, _ = _resolver({"status": "ambiguous", "mention": "bajaj", "ambiguous_candidates": ["E1", "E2"]})
-        res = await _resolve(resolver, "bajaj pat")
+        res = _resolve(resolver, "bajaj pat")
         assert "1. Bajaj Auto Ltd. (Automobile Two & Three Wheelers)\n2. Bajaj Finance Ltd. (Finance - NBFC)" in (
             res.clarification
         )
         assert ALL_OPTION not in res.clarification
         assert res.clarification.endswith(CLARIFICATION_MARKER)
 
-    async def test_ambiguous_sectors_also_offer_all_of_these(self):
+    def test_ambiguous_sectors_also_offer_all_of_these(self):
         probe, _, llm = _resolver({"status": "no_entity"}, sector_hits=[])
-        await _resolve(probe, "automobile sector pat", matcher=NAMES)
+        _resolve(probe, "automobile sector pat", matcher=NAMES)
         labels = [ln.split(".")[0] for ln in _prompt(llm).splitlines() if "[sector] Automobile" in ln]
         resolver, _, _ = _resolver(
             {"status": "ambiguous", "mention": "automobile", "ambiguous_candidates": labels}, sector_hits=[]
         )
-        res = await _resolve(resolver, "automobile sector pat", matcher=NAMES)
+        res = _resolve(resolver, "automobile sector pat", matcher=NAMES)
         assert f"3. {ALL_OPTION}" in res.clarification
 
-    async def test_hallucinated_label_asks_instead_of_guessing(self):
+    def test_hallucinated_label_asks_instead_of_guessing(self):
         resolver, _, _ = _resolver({"status": "found", "chosen": ["E99"]})
-        assert (await _resolve(resolver, "x")).status == "not_found"
+        assert (_resolve(resolver, "x")).status == "not_found"
 
-    async def test_missing_mention_uses_the_users_words(self):
+    def test_missing_mention_uses_the_users_words(self):
         resolver, _, _ = _resolver({"status": "ambiguous", "ambiguous_candidates": ["E1", "E2"]})
-        res = await _resolve(resolver, "latest pat of norton\nUser clarification: latest pat of nextgen")
+        res = _resolve(resolver, "latest pat of norton\nUser clarification: latest pat of nextgen")
         assert "**latest pat of nextgen**" in res.clarification
         assert "that name" not in res.clarification
 
-    async def test_options_picked_by_name_are_never_dropped(self):
+    def test_options_picked_by_name_are_never_dropped(self):
         # Bedrock's reply leaves out one of the picks; the names the user picked still win
         resolver, _, _ = _resolver({"status": "found", "chosen": ["E1"]}, sector_hits=[])
         q = (
             "top 5 in automobile sector\nUser clarification: all of: Automobile Two & Three Wheelers; "
             "Automobiles - Passenger Cars"
         )
-        res = await _resolve(resolver, q, matcher=NAMES)
+        res = _resolve(resolver, q, matcher=NAMES)
         assert res.status == "found"
         assert set(res.by_kind()["sector"]) == {"Automobile Two & Three Wheelers", "Automobiles - Passenger Cars"}
 
-    async def test_option_label_with_attribute_maps_to_the_entity(self):
+    def test_option_label_with_attribute_maps_to_the_entity(self):
         resolver, _, _ = _resolver({"status": "no_entity"})
-        res = await _resolve(
+        res = _resolve(
             resolver, "bajaj pat\nUser clarification: Bajaj Auto Ltd. (Automobile Two & Three Wheelers)", NAMES
         )
         assert res.status == "found" and res.by_kind() == {"company": ["Bajaj Auto Ltd."]}
 
-    async def test_free_text_reply_is_left_to_the_model(self):
+    def test_free_text_reply_is_left_to_the_model(self):
         resolver, _, llm = _resolver({"status": "found", "chosen": ["E1"]})
-        res = await _resolve(resolver, "bajaj pat\nUser clarification: bajaj auto", NAMES)
+        res = _resolve(resolver, "bajaj pat\nUser clarification: bajaj auto", NAMES)
         assert res.by_kind() == {"company": ["Bajaj Auto Ltd."]}
         llm.converse.assert_called_once()
 
     @pytest.mark.parametrize("reply", ["not json", {"status": "maybe"}])
-    async def test_unusable_reply_is_skipped(self, reply):
+    def test_unusable_reply_is_skipped(self, reply):
         resolver, _, _ = _resolver(reply)
-        assert (await _resolve(resolver, "x")).status == "skipped"
+        assert (_resolve(resolver, "x")).status == "skipped"
 
 
 @pytest.mark.unit

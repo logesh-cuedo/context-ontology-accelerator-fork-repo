@@ -15,11 +15,14 @@ Called from serve's sql_generator through a ``cuedo-ext`` hook.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable
 from typing import Any
 
 import structlog
+
+from .clients import Clients
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +52,21 @@ async def pin_tables(
     index: str,
     require_mapped: bool,
 ) -> list[Any]:
+    """Serve awaits this. The work is ``add_pinned``, run in a worker thread."""
+    return await asyncio.to_thread(
+        add_pinned, hits, tables, Clients(vector, llm), table_of, namespace, index, require_mapped
+    )
+
+
+def add_pinned(
+    hits: list[Any],
+    tables: list[str],
+    clients: Clients,
+    table_of: Callable[[str], str | None],
+    namespace: str,
+    index: str,
+    require_mapped: bool,
+) -> list[Any]:
     """``hits`` plus a hit for every table in ``tables`` (those first).
 
     Each missing table is found by a search on its own name, and kept only if
@@ -61,10 +79,8 @@ async def pin_tables(
         if table.lower() in have:
             continue
         try:
-            emb = await llm.embed(f"Table: {table}")
-            found = await vector.search(
-                emb, namespace=namespace, top_k=5, index=index, entity_type="class", require_mapped=require_mapped
-            )
+            emb = clients.embed(f"Table: {table}")
+            found = clients.search(emb, index=index, top_k=5, entity_type="class", require_mapped=require_mapped)
         except Exception as exc:
             logger.warning("metric_table_pin_failed", table=table, error=str(exc)[:200])
             continue

@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from coa_entity.pinning import metric_tables, pin_tables
+from coa_entity.pinning import add_pinned, metric_tables, pin_tables
 
 
 def _hit(table: str) -> SimpleNamespace:
@@ -37,40 +37,41 @@ class TestMetricTables:
 
 
 @pytest.mark.unit
-class TestPinTables:
-    async def _pin(self, hits, found, tables=("combined_profit_and_loss_income_yearly",)):
-        vector, llm = AsyncMock(), AsyncMock()
-        vector.search.return_value = found
-        return await pin_tables(
-            hits,
-            list(tables),
-            vector=vector,
-            llm=llm,
-            table_of=_table_of,
-            namespace="ns",
-            index="ix",
-            require_mapped=True,
-        ), vector
+class TestAddPinned:
+    def _pin(self, hits, found, tables=("combined_profit_and_loss_income_yearly",)):
+        clients = MagicMock()  # Clients: embed / search, plain calls
+        clients.search.return_value = found
+        return add_pinned(hits, list(tables), clients, _table_of, "ns", "ix", True), clients
 
-    async def test_missing_table_is_added_first(self):
-        out, _ = await self._pin(
+    def test_missing_table_is_added_first(self):
+        out, _ = self._pin(
             [_hit("analysis_income_ttm")], [_hit("x_backup"), _hit("combined_profit_and_loss_income_yearly")]
         )
         assert [_table_of(h.text) for h in out] == ["combined_profit_and_loss_income_yearly", "analysis_income_ttm"]
 
-    async def test_present_table_is_not_searched(self):
-        out, vector = await self._pin([_hit("combined_profit_and_loss_income_yearly")], [])
-        vector.search.assert_not_called()
+    def test_present_table_is_not_searched(self):
+        out, clients = self._pin([_hit("combined_profit_and_loss_income_yearly")], [])
+        clients.search.assert_not_called()
         assert len(out) == 1
 
-    async def test_only_an_exact_name_is_pinned(self):
-        out, _ = await self._pin([_hit("a")], [_hit("combined_profit_and_loss_income_yearly_backup")])
+    def test_only_an_exact_name_is_pinned(self):
+        out, _ = self._pin([_hit("a")], [_hit("combined_profit_and_loss_income_yearly_backup")])
         assert [_table_of(h.text) for h in out] == ["a"]
 
-    async def test_lookup_failure_leaves_hits_unchanged(self):
-        vector, llm = AsyncMock(), AsyncMock()
-        vector.search.side_effect = RuntimeError("down")
+    def test_lookup_failure_leaves_hits_unchanged(self):
+        clients = MagicMock()
+        clients.search.side_effect = RuntimeError("down")
         hits = [_hit("a")]
-        out = await pin_tables(hits, ["b"], vector=vector, llm=llm, table_of=_table_of, namespace="n", index="i",
+        assert add_pinned(hits, ["b"], clients, _table_of, "n", "i", False) == hits
+
+    async def test_serve_entry_point_runs_the_plain_function(self, monkeypatch):
+        seen = {}
+
+        def fake(hits, tables, clients, *rest):
+            seen["clients"] = clients
+            return ["pinned", *hits]
+
+        monkeypatch.setattr("coa_entity.pinning.add_pinned", fake)
+        out = await pin_tables(["h"], ["t"], vector="v", llm="l", table_of=_table_of, namespace="n", index="i",
                                require_mapped=False)  # fmt: skip
-        assert out == hits
+        assert out == ["pinned", "h"] and seen["clients"]._vector == "v"
