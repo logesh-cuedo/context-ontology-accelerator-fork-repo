@@ -8,6 +8,9 @@
     await hook.before_tier2(...)      Tier2Outcome(clarification=..., sql_context=...)
     hook.clarification_response(...)  the response that asks the user to choose
 
+before_tier2 is the only async method: it runs ``run`` in a worker thread, and
+everything under ``run`` is plain code, so a debugger steps through it in order.
+
 Which index to search, and the name list for name matching, come from the
 pointer the index build saves (active.py). If anything is missing or fails
 (no config, a bad config, an SSM or S3 error), Tier 2 simply runs as normal.
@@ -25,6 +28,7 @@ from typing import Any
 import structlog
 
 from .active import ActivePointer, read_pointer
+from .clients import Clients
 from .config import EntityConfig, EntityConfigError, load_config
 from .index_builder import index_name
 from .lexical import matcher_from_catalog
@@ -52,8 +56,7 @@ class EntityHook:
         self, vector_client: Any, llm_client: Any, ssm_client: Any, s3_client: Any, ssm_prefix: str, collection: str
     ):
         """Keep the clients: search and Bedrock (from serve), SSM for the config, S3 for the name list."""
-        self._vector = vector_client
-        self._llm = llm_client
+        self._clients = Clients(vector_client, llm_client)
         self._ssm = ssm_client
         self._s3 = s3_client
         self._ssm_prefix = ssm_prefix
@@ -66,13 +69,78 @@ class EntityHook:
         """The original question plus the user's answer, when this message answers our question."""
         return resume_clarification(query, history)
 
-    async def config_for(self, namespace: str) -> EntityConfig | None:
+    async def before_tier2(
+        self,
+        query: str,
+        namespace: str,
+        embedding: list[float] | None,
+        trace: Any,
+        model_id: str | None,
+    ) -> Tier2Outcome:
+        """Serve awaits this. The work is ``run``, a plain function, in a worker thread.
+
+        The trace step is recorded here, back on serve's event loop: recording it
+        sends it to the browser, which must not happen from another thread.
+        """
+        outcome, step = await asyncio.to_thread(self.run, query, namespace, embedding, model_id)
+        if step is not None:
+            trace.record(STEP_ID, step["status"], step["ms"], detail=step["detail"], tool_used="opensearch")
+        return outcome
+
+    def run(
+        self, query: str, namespace: str, embedding: list[float] | None, model_id: str | None
+    ) -> tuple[Tier2Outcome, dict | None]:
+        """Find the question's companies / sectors. Never raises an error.
+
+        Returns what serve does next, and the trace step to record (None when the
+        feature is off for this namespace).
+
+        Time periods (FY25, Q3 FY25, ...) are not handled here: a ``time`` block in the
+        config is still accepted but ignored. Periods are left to the metrics.
+        """
+        config = self.config_for(namespace)
+        if config is None or not config.entity_types:
+            return Tier2Outcome(), None
+
+        start = time.perf_counter()
+        pointer = self.pointer_for(namespace)
+        index = pointer.index if pointer else index_name(self._collection, namespace)  # no pointer: older index
+        matcher = self.matcher_for(pointer, namespace)
+        self._clients.last_reasoning = ""
+        resolution = resolve_entities(
+            self._clients,
+            query,
+            namespace,
+            config,
+            index=index,
+            matcher=matcher,
+            embedding=embedding,
+            model_id=model_id,
+        )
+        detail: dict[str, Any] = {
+            "status": resolution.status,
+            "entities": resolution.by_kind(),
+            **({"reason": resolution.reason} if resolution.reason else {}),
+        }
+        if os.environ.get("ENTITY_REASONING_EFFORT") and self._clients.last_reasoning:
+            # Debugging only: the model's reasoning goes into the trace (ask.py prints it).
+            detail["reasoning"] = self._clients.last_reasoning
+        step = {
+            "status": "skipped" if resolution.status == "skipped" else "success",
+            "ms": int((time.perf_counter() - start) * 1000),
+            "detail": detail,
+        }
+        if resolution.needs_clarification:
+            return Tier2Outcome(clarification=resolution.clarification), step
+        return Tier2Outcome(sql_context=resolved_block(resolution, config) or fallback_rules(config)), step
+
+    def config_for(self, namespace: str) -> EntityConfig | None:
         """The namespace's entity config, cached for 5 minutes. None means the feature is off."""
         cached = self._configs.get(namespace)
         if cached is not None and time.monotonic() - cached[1] < _CONFIG_TTL_S:
             return cached[0]
         try:
-            config = await asyncio.to_thread(load_config, self._ssm, self._ssm_prefix, namespace)
+            config = load_config(self._ssm, self._ssm_prefix, namespace)
         except EntityConfigError as exc:
             logger.warning("entity_config_invalid", namespace=namespace, error=str(exc)[:300])
             config = None
@@ -83,85 +151,36 @@ class EntityHook:
         self._configs[namespace] = (config, time.monotonic())
         return config
 
-    async def before_tier2(
-        self,
-        query: str,
-        namespace: str,
-        embedding: list[float] | None,
-        trace: Any,
-        model_id: str | None,
-        history: list[dict[str, str]] | None = None,
-    ) -> Tier2Outcome:
-        """Find the question's companies / sectors, and log a trace step. Never raises an error.
+    def pointer_for(self, namespace: str) -> ActivePointer | None:
+        """Which index version to search. Cached for 1 minute; on an SSM error the last one is kept."""
+        cached = self._pointers.get(namespace)
+        if cached is not None and time.monotonic() - cached[1] < _POINTER_TTL_S:
+            return cached[0]
+        try:
+            pointer = read_pointer(self._ssm, self._ssm_prefix, namespace)
+        except Exception as exc:
+            logger.warning("entity_pointer_unavailable", namespace=namespace, error=str(exc)[:200])
+            pointer = cached[0] if cached else None
+        self._pointers[namespace] = (pointer, time.monotonic())
+        return pointer
 
-        Time periods (FY25, Q3 FY25, ...) are not handled here: a ``time`` block in the
-        config is still accepted but ignored. Periods are left to the metrics.
-        """
-        config = await self.config_for(namespace)
-        if config is None:
-            return Tier2Outcome()
-        sections: list[str] = []
-
-        if config.entity_types:
-            start = time.perf_counter()
-            # Which index version to search. Cached for 1 minute; on an SSM error the last one is kept.
-            cached = self._pointers.get(namespace)
-            if cached is not None and time.monotonic() - cached[1] < _POINTER_TTL_S:
-                pointer = cached[0]
-            else:
-                try:
-                    pointer = await asyncio.to_thread(read_pointer, self._ssm, self._ssm_prefix, namespace)
-                except Exception as exc:
-                    logger.warning("entity_pointer_unavailable", namespace=namespace, error=str(exc)[:200])
-                    pointer = cached[0] if cached else None
-                self._pointers[namespace] = (pointer, time.monotonic())
-
-            index, matcher = index_name(self._collection, namespace), None  # older index without versions
-            if pointer is not None:
-                index, uri = pointer.index, pointer.names_uri
-                matcher = self._matchers.get(uri)
-                if matcher is None and uri:  # load this version's name list from S3 (only once)
-                    try:
-                        bucket, _, key = uri.removeprefix("s3://").partition("/")
-                        matcher = await asyncio.to_thread(
-                            lambda: matcher_from_catalog(
-                                json.loads(self._s3.get_object(Bucket=bucket, Key=key)["Body"].read())
-                            )
-                        )
-                        if len(self._matchers) >= 8:  # keep at most 8; drop the oldest
-                            self._matchers.pop(next(iter(self._matchers)))
-                        self._matchers[uri] = matcher
-                    except Exception as exc:
-                        logger.warning("entity_names_unavailable", namespace=namespace, error=str(exc)[:200])
-
-            resolution = await resolve_entities(
-                self._vector,
-                self._llm,
-                query,
-                namespace,
-                config,
-                index=index,
-                matcher=matcher,
-                embedding=embedding,
-                model_id=model_id,
-                history=history,
-            )
-            trace.record(
-                STEP_ID,
-                "skipped" if resolution.status == "skipped" else "success",
-                int((time.perf_counter() - start) * 1000),
-                detail={
-                    "status": resolution.status,
-                    "entities": resolution.by_kind(),
-                    **({"reason": resolution.reason} if resolution.reason else {}),
-                },
-                tool_used="opensearch",
-            )
-            if resolution.needs_clarification:
-                return Tier2Outcome(clarification=resolution.clarification)
-            sections.append(resolved_block(resolution, config) or fallback_rules(config))
-
-        return Tier2Outcome(sql_context="\n\n".join(s for s in sections if s))
+    def matcher_for(self, pointer: ActivePointer | None, namespace: str) -> dict | None:
+        """The name list for name matching, loaded from S3 once per index version. None if unavailable."""
+        uri = pointer.names_uri if pointer else ""
+        if not uri:
+            return None
+        if uri in self._matchers:
+            return self._matchers[uri]
+        try:
+            bucket, _, key = uri.removeprefix("s3://").partition("/")
+            matcher = matcher_from_catalog(json.loads(self._s3.get_object(Bucket=bucket, Key=key)["Body"].read()))
+        except Exception as exc:
+            logger.warning("entity_names_unavailable", namespace=namespace, error=str(exc)[:200])
+            return None
+        if len(self._matchers) >= 8:  # keep at most 8; drop the oldest
+            self._matchers.pop(next(iter(self._matchers)))
+        self._matchers[uri] = matcher
+        return matcher
 
     @staticmethod
     def clarification_response(text: str, trace: Any, metadata: dict) -> Any:
