@@ -90,6 +90,7 @@ class EntityHook:
         embedding: list[float] | None,
         trace: Any,
         model_id: str | None,
+        history: list[dict[str, str]] | None = None,
     ) -> Tier2Outcome:
         """Find the question's companies / sectors, and log a trace step. Never raises an error.
 
@@ -143,6 +144,7 @@ class EntityHook:
                 matcher=matcher,
                 embedding=embedding,
                 model_id=model_id,
+                history=history,
             )
             trace.record(
                 STEP_ID,

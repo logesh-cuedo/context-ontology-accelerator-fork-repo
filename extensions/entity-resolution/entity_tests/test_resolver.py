@@ -15,6 +15,7 @@ from coa_entity.lexical import NameEntry, build_matcher
 from coa_entity.resolver import (
     ALL_OPTION,
     CLARIFICATION_MARKER,
+    CLARIFICATION_PREFIX,
     EntityCandidate,
     EntityResolution,
     fallback_rules,
@@ -63,9 +64,16 @@ def _resolver(reply: dict | str, company_hits=COMPANY_HITS, sector_hits=SECTOR_H
     return (vector, llm), vector, llm
 
 
-async def _resolve(clients, query, matcher=None):
+async def _resolve(clients, query, matcher=None, history=None):
     return await resolve_entities(
-        *clients, query, "ns1", sample_config(), index="ix-v1", matcher=matcher, embedding=[0.1]
+        *clients,
+        query,
+        "ns1",
+        sample_config(),
+        index="ix-v1",
+        matcher=matcher,
+        embedding=[0.1],
+        history=history,
     )
 
 
@@ -191,6 +199,33 @@ class TestOutcomes:
         assert res.by_kind() == {"company": ["Bajaj Auto Ltd."]}
         llm.converse.assert_called_once()
 
+    async def test_picked_option_skips_the_search_and_the_model(self):
+        # The user answered our question, so the entity is already known: resolving it
+        # again could only cost two round trips, or disagree with the person who chose.
+        resolver, vector, llm = _resolver({"status": "ambiguous", "mention": "bajaj"})
+        res = await _resolve(resolver, "bajaj pat\nUser clarification: Bajaj Auto Ltd.", NAMES)
+        assert res.status == "found"
+        assert res.by_kind() == {"company": ["Bajaj Auto Ltd."]}
+        assert [c.key for c in res.chosen] == ["101"]  # the id, for the SQL filter
+        vector.search.assert_not_called()
+        llm.converse.assert_not_called()
+        llm.embed.assert_not_called()
+
+    async def test_picked_option_keeps_the_label_we_offered(self):
+        # Options are shown as "Name (attribute)", and that is what a UI sends back.
+        resolver, _, llm = _resolver({"status": "ambiguous", "mention": "bajaj"})
+        reply = "User clarification: Bajaj Auto Ltd. (Automobile Two & Three Wheelers)"
+        res = await _resolve(resolver, f"bajaj pat\n{reply}", NAMES)
+        assert res.by_kind() == {"company": ["Bajaj Auto Ltd."]}
+        llm.converse.assert_not_called()
+
+    async def test_all_of_reply_keeps_every_pick(self):
+        resolver, _, llm = _resolver({"status": "ambiguous", "mention": "x"})
+        reply = "User clarification: all of: Bajaj Auto Ltd.; Tata Consultancy Services Ltd."
+        res = await _resolve(resolver, f"compare pat\n{reply}", NAMES)
+        assert res.by_kind() == {"company": ["Bajaj Auto Ltd.", "Tata Consultancy Services Ltd."]}
+        llm.converse.assert_not_called()
+
     @pytest.mark.parametrize("reply", ["not json", {"status": "maybe"}])
     async def test_unusable_reply_is_skipped(self, reply):
         resolver, _, _ = _resolver(reply)
@@ -206,8 +241,24 @@ class TestPromptSections:
         )
         assert (
             "company: Bajaj Auto Ltd. (company_id 101, cd_sector Automobile) → "
-            "LOWER(company_name) LIKE '%bajaj auto ltd.%' AND sector = 'Automobile'"
+            "company_id = 101 AND sector = 'Automobile'"
         ) in resolved_block(res, sample_config())
+
+    def test_company_filter_uses_the_id_not_the_name(self):
+        # "Tata Steel Ltd." is a prefix of "Tata Steel Ltd. - (TATASTEELPP)", a different
+        # company: a LIKE on the chosen name matches both, and after a clarification the
+        # other one is exactly what the user rejected.
+        res = EntityResolution(status="found", chosen=[EntityCandidate("company", "100470", "Tata Steel Ltd.")])
+        filter_line = next(
+            ln for ln in resolved_block(res, sample_config()).splitlines() if ln.startswith("- company:")
+        )
+        assert filter_line.endswith("company_id = 100470")
+
+    def test_non_numeric_key_is_quoted(self):
+        # company_id is a bigint (an unquoted literal), but a key that is not a number
+        # must still be a valid SQL string.
+        res = EntityResolution(status="found", chosen=[EntityCandidate("company", "ACME-1", "Acme Ltd.")])
+        assert "company_id = 'ACME-1'" in resolved_block(res, sample_config())
 
     def test_sectors_become_one_in_list_with_the_table_column_named(self):
         res = EntityResolution(
@@ -274,3 +325,141 @@ class TestResume:
 
     def test_not_after_a_normal_answer(self):
         assert resume_clarification("1", [{"role": "assistant", "content": "hello"}]) is None
+
+
+@pytest.mark.unit
+class TestComparison:
+    """A comparison names one entity and refers back to another ("compare it with X").
+
+    Answering it with only the named one is how a two-company question came back with
+    one company's rows.
+    """
+
+    def _asked(self, question: str) -> list[dict]:
+        return [{"role": "user", "content": question}]
+
+    async def test_carries_the_earlier_company_alongside_the_named_one(self):
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": True})
+        out = await _resolve(
+            resolver,
+            "compare it with bajaj auto",
+            matcher=NAMES,
+            history=self._asked("grindwell norton ltd. pat fy24"),
+        )
+        assert out.status == "found"
+        assert [c.name for c in out.chosen] == ["Grindwell Norton Ltd.", "Bajaj Auto Ltd."]
+
+    async def test_a_plain_question_carries_nothing(self):
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": False})
+        out = await _resolve(
+            resolver,
+            "bajaj auto pat",
+            matcher=NAMES,
+            history=self._asked("grindwell norton ltd. pat fy24"),
+        )
+        assert [c.name for c in out.chosen] == ["Bajaj Auto Ltd."]
+
+    async def test_the_same_company_is_not_added_twice(self):
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": True})
+        out = await _resolve(
+            resolver,
+            "compare it with bajaj auto",
+            matcher=NAMES,
+            history=self._asked("bajaj auto ltd. pat fy24"),
+        )
+        assert [c.name for c in out.chosen] == ["Bajaj Auto Ltd."]
+
+    async def test_a_lookalike_in_the_earlier_question_is_not_carried(self):
+        # "and the margin" scores Marg Ltd. under the fuzzy matcher; only a name
+        # written out in full may be carried back.
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": True})
+        out = await _resolve(
+            resolver, "compare it with bajaj auto", matcher=NAMES, history=self._asked("and the margin")
+        )
+        assert [c.name for c in out.chosen] == ["Bajaj Auto Ltd."]
+
+    async def test_two_earlier_names_carry_nothing(self):
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": True})
+        out = await _resolve(
+            resolver,
+            "compare it with bajaj auto",
+            matcher=NAMES,
+            history=self._asked("grindwell norton ltd. vs tata consultancy services ltd."),
+        )
+        assert [c.name for c in out.chosen] == ["Bajaj Auto Ltd."]
+
+    async def test_without_a_matcher_nothing_is_carried(self):
+        resolver, *_ = _resolver({"status": "found", "chosen": ["E1"], "refers_back": True})
+        out = await _resolve(resolver, "compare it with bajaj auto", history=self._asked("grindwell norton ltd. pat"))
+        assert [c.name for c in out.chosen] == ["Bajaj Auto Ltd."]
+
+
+@pytest.mark.unit
+class TestCarriedName:
+    """Which earlier questions a comparison may take its other entity from."""
+
+    MATCHER = build_matcher(
+        [
+            NameEntry("company", "1", "IOL"),
+            NameEntry("company", "2", "Marg Ltd."),
+            NameEntry("company", "3", "Bajaj Auto Ltd."),
+            NameEntry("company", "4", "Tata Steel Ltd."),
+            NameEntry("company", "5", "Tata Steel Ltd. - (TATASTEELPP)"),
+        ]
+    )
+
+    @pytest.mark.parametrize(
+        "question,expected",
+        [
+            ("marg ltd. pat", ["Marg Ltd."]),
+            ("pat of marg ltd.", ["Marg Ltd."]),
+            ("marg ltd pat", ["Marg Ltd."]),  # the name's own punctuation is optional
+            ("revenue for bajaj auto ltd. in fy24", ["Bajaj Auto Ltd."]),
+            # Written short, as people actually write them.
+            ("bajaj auto revenue fy24", ["Bajaj Auto Ltd."]),
+            # One word names a house, not a company: too weak to carry.
+            ("iol pat fy24", []),
+            ("what is the iolite margin", []),
+            # The lookalikes the fuzzy matcher would have scored.
+            ("and the margin", []),
+            ("roce for same", []),
+            ("top 10 by revenue", []),
+            # Two names: which one is referred back to is not ours to guess.
+            ("bajaj auto ltd. vs marg ltd.", []),
+            # A twin contains its sibling's whole name; the longer one is what was asked.
+            ("tata steel ltd. pat", ["Tata Steel Ltd."]),
+            ("tata steel ltd. - (tatasteelpp) pat", ["Tata Steel Ltd. - (TATASTEELPP)"]),
+        ],
+    )
+    def test_only_a_name_written_out_is_carried(self, question, expected):
+        from coa_entity.resolver import _carried_choice
+
+        history = [{"role": "user", "content": question}]
+        assert [c.name for c in _carried_choice(self.MATCHER, history)] == expected
+
+    def test_an_older_turn_is_used_when_the_latest_names_nobody(self):
+        from coa_entity.resolver import _carried_choice
+
+        history = [
+            {"role": "user", "content": "bajaj auto ltd. pat"},
+            {"role": "user", "content": "and the margin"},
+        ]
+        assert [c.name for c in _carried_choice(self.MATCHER, history)] == ["Bajaj Auto Ltd."]
+
+    def test_the_latest_turn_wins_over_an_older_clarification(self):
+        # The user clarified Tata Steel, then moved on to Bajaj by name. "compare it
+        # with X" refers to Bajaj; preferring the clarification carried the company
+        # they had already left behind.
+        from coa_entity.resolver import _carried_choice
+
+        history = [
+            {"role": "user", "content": f"tata steel pat{CLARIFICATION_PREFIX} Tata Steel Ltd."},
+            {"role": "user", "content": "bajaj auto ltd. revenue fy24"},
+        ]
+        assert [c.name for c in _carried_choice(self.MATCHER, history)] == ["Bajaj Auto Ltd."]
+
+    def test_a_clarification_answer_is_carried_not_the_words_it_settled(self):
+        from coa_entity.resolver import _carried_choice
+
+        history = [{"role": "user", "content": f"tata steel pat{CLARIFICATION_PREFIX} Tata Steel Ltd. - (TATASTEELPP)"}]
+        assert [c.name for c in _carried_choice(self.MATCHER, history)] == ["Tata Steel Ltd. - (TATASTEELPP)"]
