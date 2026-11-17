@@ -323,7 +323,9 @@ class Orchestrator:
             # cuedo-ext: entity resolution — ask the user, or pass entity filters to SQL generation.
             tier2_options = options
             if self._entity_hook is not None:
-                ext = await self._entity_hook.before_tier2(query, namespace, query_embedding, trace, model_id_override)
+                ext = await self._entity_hook.before_tier2(
+                    query, namespace, query_embedding, trace, model_id_override, conversation_history
+                )
                 if ext.clarification:
                     meta = self._assembler._base_metadata(
                         namespace, display_principal(profile), model_id=model_id_override
