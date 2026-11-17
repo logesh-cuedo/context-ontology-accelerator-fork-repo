@@ -76,19 +76,25 @@ class EntityHook:
         embedding: list[float] | None,
         trace: Any,
         model_id: str | None,
+        history: list[dict[str, str]] | None = None,
     ) -> Tier2Outcome:
         """Serve awaits this. The work is ``run``, a plain function, in a worker thread.
 
         The trace step is recorded here, back on serve's event loop: recording it
         sends it to the browser, which must not happen from another thread.
         """
-        outcome, step = await asyncio.to_thread(self.run, query, namespace, embedding, model_id)
+        outcome, step = await asyncio.to_thread(self.run, query, namespace, embedding, model_id, history)
         if step is not None:
             trace.record(STEP_ID, step["status"], step["ms"], detail=step["detail"], tool_used="opensearch")
         return outcome
 
     def run(
-        self, query: str, namespace: str, embedding: list[float] | None, model_id: str | None
+        self,
+        query: str,
+        namespace: str,
+        embedding: list[float] | None,
+        model_id: str | None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[Tier2Outcome, dict | None]:
         """Find the question's companies / sectors. Never raises an error.
 
@@ -116,6 +122,7 @@ class EntityHook:
             matcher=matcher,
             embedding=embedding,
             model_id=model_id,
+            history=history,
         )
         detail: dict[str, Any] = {
             "status": resolution.status,
