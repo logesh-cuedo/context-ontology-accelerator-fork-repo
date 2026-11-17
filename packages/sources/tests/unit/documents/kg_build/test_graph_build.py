@@ -283,6 +283,9 @@ class TestEnvValidation:
             ("EXTRACTION_MAX_ATTEMPTS", "many", "must be an integer"),
             ("EXTRACTION_NUM_THREADS_PER_WORKER", "257", "must be in"),
             ("EXTRACTION_NUM_THREADS_PER_WORKER", "4.5", "must be an integer"),
+            ("KG_BUILD_DOC_BATCH_SIZE", "0", "must be in"),
+            ("KG_BUILD_DOC_BATCH_SIZE", "lots", "must be an integer"),
+            ("KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES", "0", "must be in"),
         ],
     )
     def test_extraction_client_env_rejects_malformed_or_unsafe_values(
@@ -703,58 +706,166 @@ class TestRunContinuous:
             {"docsGraphIngested": 5},
         )
 
-    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
-    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
-    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
-    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
-    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
-    def test_failure_returns_zero_ok(self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod):
-        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
-        mock_index.extract_and_build.side_effect = RuntimeError("boom")
-        ddb = _mock_ddb_access()
+    _DDB_KEY = {"namespace_id": "tenant-a", "doc_source_id": "ds-001"}
 
-        docs = [MagicMock() for _ in range(3)]
-        ok, fail = mod._run_continuous(
-            docs,
-            "wss://nep:8182/sparql",
-            "aoss://oss",
-            "t.a.ds.001",
-            None,
-            ddb,
-            {"namespace_id": "tenant-a", "doc_source_id": "ds-001"},
-            None,
+    @staticmethod
+    def _docs(*names):
+        return [MagicMock(name=n, metadata={"source_s3_key": f"AR-Concalls/ingest/v1/{n}.md"}) for n in names]
+
+    def _run(self, mod, docs, ddb):
+        return mod._run_continuous(
+            docs, "wss://nep:8182/sparql", "aoss://oss", "t.a.ds.001", None, ddb, self._DDB_KEY, None
         )
 
-        assert ok == 0
-        assert fail == 3
+    @staticmethod
+    def _batches(mock_index):
+        return [c.args[0] for c in mock_index.extract_and_build.call_args_list]
 
     @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
     @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
     @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
     @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
     @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
-    def test_failure_updates_ddb_status_to_failed(self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod):
-        """When extract_and_build fails, DDB status should be set to FAILED."""
+    def test_documents_go_to_the_toolkit_in_batches(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod, monkeypatch
+    ):
+        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+        monkeypatch.setattr(mod, "KG_BUILD_DOC_BATCH_SIZE", 2)
+        ddb = _mock_ddb_access()
+        docs = self._docs("a", "b", "c", "d", "e")
+
+        ok, fail = self._run(mod, docs, ddb)
+
+        assert (ok, fail) == (5, 0)
+        assert self._batches(mock_index) == [docs[0:2], docs[2:4], docs[4:5]]
+        # Every call shares one checkpoint, so a retry skips chunks already written.
+        assert all(c.kwargs["checkpoint"] is _ckpt.return_value for c in mock_index.extract_and_build.call_args_list)
+        updates = [c.args[1] for c in ddb.update.call_args_list]
+        assert [u["docsGraphIngested"] for u in updates if "docsGraphIngested" in u] == [2, 4, 5]
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_bad_document_is_skipped_and_the_run_continues(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod, monkeypatch
+    ):
+        """The Capacit'e case: one document's failure costs that document, not the run."""
+        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+        monkeypatch.setattr(mod, "KG_BUILD_DOC_BATCH_SIZE", 2)
+        docs = self._docs("ok-1", "capacite", "ok-2", "ok-3")
+
+        def extract_and_build(batch, **_kwargs):
+            if any(d is docs[1] for d in batch):
+                raise RuntimeError("MalformedQueryException")
+
+        mock_index.extract_and_build.side_effect = extract_and_build
+        ddb = _mock_ddb_access()
+
+        with patch.object(mod, "_check_backend_health", return_value=True) as health:
+            ok, fail = self._run(mod, docs, ddb)
+
+        assert (ok, fail) == (3, 1)
+        assert self._batches(mock_index) == [docs[0:2], [docs[0]], [docs[1]], docs[2:4]]
+        health.assert_called_once()
+        assert all(c.args[1].get("status") != SourceStatus.SCAN_FAILED for c in ddb.update.call_args_list)
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_every_document_failing_below_the_limit_returns_zero_ok(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod
+    ):
         mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
         mock_index.extract_and_build.side_effect = RuntimeError("boom")
         ddb = _mock_ddb_access()
 
-        docs = [MagicMock() for _ in range(3)]
-        mod._run_continuous(
-            docs,
-            "wss://nep:8182/sparql",
-            "aoss://oss",
-            "t.a.ds.001",
-            None,
-            ddb,
-            {"namespace_id": "tenant-a", "doc_source_id": "ds-001"},
-            None,
-        )
+        with patch.object(mod, "_check_backend_health", return_value=True):
+            ok, fail = self._run(mod, self._docs("a", "b", "c"), ddb)
 
-        # Verify DDB was updated with SCAN_FAILED status
-        assert ddb.update.call_count == 2
-        last_call = ddb.update.call_args_list[-1]
-        assert last_call[0][1]["status"] == "SCAN_FAILED"
+        # main() turns docs_ok == 0 into SCAN_FAILED; this layer only reports counts.
+        assert (ok, fail) == (0, 3)
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_unhealthy_backend_aborts_without_per_document_retries(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod
+    ):
+        """Neptune stopped mid-run: no point failing the corpus one document at a time."""
+        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+        mock_index.extract_and_build.side_effect = RuntimeError("ConnectTimeoutError")
+        ddb = _mock_ddb_access()
+
+        with (
+            patch.object(mod, "_check_backend_health", return_value=False),
+            pytest.raises(mod._BuildAbortedError, match="backend unhealthy"),
+        ):
+            self._run(mod, self._docs("a", "b", "c"), ddb)
+
+        mock_index.extract_and_build.assert_called_once()
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_consecutive_document_failures_abort_and_mark_failed(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod, monkeypatch
+    ):
+        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+        monkeypatch.setattr(mod, "KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES", 2)
+        mock_index.extract_and_build.side_effect = RuntimeError("boom")
+        ddb = _mock_ddb_access()
+
+        with (
+            patch.object(mod, "_check_backend_health", return_value=True),
+            pytest.raises(mod._BuildAbortedError, match="2 consecutive"),
+        ):
+            self._run(mod, self._docs("a", "b", "c", "d"), ddb)
+
+        # The batch, then two single-document retries; the third document is never tried.
+        assert mock_index.extract_and_build.call_count == 3
+        last = ddb.update.call_args_list[-1].args[1]
+        assert last["status"] == SourceStatus.SCAN_FAILED
+        assert "2 documents failed in a row" in last["errorMessage"]
+        assert "boom" in last["errorMessage"]
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_a_success_resets_the_consecutive_failure_count(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, mod, monkeypatch
+    ):
+        mock_index, _, _ = _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+        monkeypatch.setattr(mod, "KG_BUILD_DOC_BATCH_SIZE", 4)
+        monkeypatch.setattr(mod, "KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES", 2)
+        docs = self._docs("bad-1", "good-1", "bad-2", "good-2")
+        bad = (docs[0], docs[2])
+
+        def extract_and_build(batch, **_kwargs):
+            if any(d is b for d in batch for b in bad):
+                raise RuntimeError("boom")
+
+        mock_index.extract_and_build.side_effect = extract_and_build
+        ddb = _mock_ddb_access()
+
+        with patch.object(mod, "_check_backend_health", return_value=True):
+            ok, fail = self._run(mod, docs, ddb)
+
+        assert (ok, fail) == (2, 2)
+
+    def test_doc_label_prefers_the_s3_key(self, mod):
+        doc = MagicMock(metadata={"source_s3_key": "AR/Capacit'e (285668)/AR.md", "filename": "AR.md"})
+        assert mod._doc_label(doc) == "AR/Capacit'e (285668)/AR.md"
+        assert mod._doc_label(MagicMock(metadata={"filename": "AR.md"})) == "AR.md"
 
 
 # ===================================================================
@@ -1411,7 +1522,8 @@ class TestMainFlow:
             with pytest.raises(SystemExit) as exc_info:
                 mod.main()
             assert exc_info.value.code == 1
-        mock_index.extract_and_build.assert_called_once()
+        # The one-document batch, then that document retried on its own.
+        assert mock_index.extract_and_build.call_count == 2
 
 
 # ===================================================================

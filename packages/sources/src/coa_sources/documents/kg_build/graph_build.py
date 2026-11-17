@@ -61,6 +61,13 @@ Environment variables:
     EXTRACTION_NUM_THREADS_PER_WORKER — per-process extraction fan-out used to
                                 size the HTTP connection pool (default: 4;
                                 valid range: 1–256).
+    KG_BUILD_DOC_BATCH_SIZE  — documents per extract_and_build() call in continuous
+                                mode; a failed batch is retried one document at a
+                                time (default: 20, or EXTRACTION_BATCH_SIZE with
+                                batch inference; valid range: 1–100000).
+    KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES — failed documents in a row before the
+                                run aborts instead of skipping on (default: 5;
+                                valid range: 1–1000).
 
 Notes:
   AOSS NEXTGEN rejects knn_vector mappings with a 'method.engine' key.
@@ -318,6 +325,30 @@ EXTRACTION_NUM_THREADS_PER_WORKER = _bounded_int_env(
     4,
     minimum=1,
     maximum=256,
+)
+
+# Documents per extract_and_build() call in continuous mode. A failure inside one
+# call fails the whole call, so this is how much work one bad document can take down
+# before its batch is retried document by document. The toolkit already works in
+# extraction batches of 4 documents (GraphRAGConfig.extraction_batch_size) and drains
+# each before starting the next, so splitting the corpus at 20 costs no parallelism.
+# Batch inference needs its large job batches intact, so it defaults to that size.
+KG_BUILD_DOC_BATCH_SIZE = _bounded_int_env(
+    "KG_BUILD_DOC_BATCH_SIZE",
+    EXTRACTION_BATCH_SIZE if USE_BATCH_INFERENCE else 20,
+    minimum=1,
+    maximum=100000,
+)
+
+# Documents that may fail one after another (retried on their own after a failed
+# batch) before the run aborts. One bad document is skipped; a run of them means the
+# fault is not in the documents, and skipping on would discard the corpus one
+# document at a time.
+KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES = _bounded_int_env(
+    "KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES",
+    5,
+    minimum=1,
+    maximum=1000,
 )
 
 # Vector indexes to build: ``chunk`` + ``topic``, matching the graphrag-toolkit
@@ -1228,8 +1259,22 @@ def _build_indexing_config(bucket_name: str, namespace_id: str, doc_source_id: s
 
 
 # ---------------------------------------------------------------------------
-# Mode: continuous — extract_and_build() in a single pass
+# Mode: continuous — extract_and_build() in document batches
 # ---------------------------------------------------------------------------
+
+
+class _BuildAbortedError(RuntimeError):
+    """The build hit a fault that is not about one document; stop instead of skipping on.
+
+    Raised after DDB has been marked SCAN_FAILED with the cause, so the caller only
+    has to exit non-zero.
+    """
+
+
+def _doc_label(doc) -> str:
+    """The S3 key (or filename) that identifies a document in logs."""
+    metadata = getattr(doc, "metadata", None) or {}
+    return str(metadata.get("source_s3_key") or metadata.get("filename") or getattr(doc, "doc_id", "?"))
 
 
 def _run_continuous(
@@ -1242,7 +1287,30 @@ def _run_continuous(
     ddb_key: dict,
     progress_monitor,
 ) -> tuple[int, int]:
-    """Single-pass extract_and_build(). Toolkit handles micro-batching internally."""
+    """extract_and_build() over batches of KG_BUILD_DOC_BATCH_SIZE documents.
+
+    The corpus used to go to the toolkit in one call, and the toolkit has no
+    per-document error handling, so one bad document (an apostrophe in an S3 key
+    that broke the versioning query) ended a run 3.5 days in and counted every
+    document as failed. Now a failed batch is retried one document at a time: the
+    documents that succeed on their own are kept, the ones that fail again are
+    logged and skipped, and the run carries on with the next batch.
+
+    A fault that is not about a document (Neptune stopped, AOSS unreachable) would
+    fail every document in turn, so it must end the run instead:
+
+    - after a failed batch the backends are health-checked before any retry;
+    - KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES failed documents in a row abort.
+
+    Both raise ``_BuildAbortedError`` with DDB already marked SCAN_FAILED.
+
+    The checkpoint is shared by every call, so a retried document skips the chunks
+    its failed batch already wrote. The progress monitor is not: a retried
+    document's LLM/graph counts are reported again, so the live counters can run
+    slightly ahead of the true totals after a failure.
+
+    Returns ``(docs_ok, docs_failed)``.
+    """
     from graphrag_toolkit.lexical_graph import LexicalGraphIndex
     from graphrag_toolkit.lexical_graph.indexing.build import Checkpoint
     from graphrag_toolkit.lexical_graph.storage import GraphStoreFactory, VectorStoreFactory
@@ -1250,7 +1318,14 @@ def _run_continuous(
     total_docs = len(documents)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    logger.info("Starting continuous KG build", total_docs=total_docs, batch_inference=USE_BATCH_INFERENCE)
+    batches = [documents[i : i + KG_BUILD_DOC_BATCH_SIZE] for i in range(0, total_docs, KG_BUILD_DOC_BATCH_SIZE)]
+    logger.info(
+        "Starting continuous KG build",
+        total_docs=total_docs,
+        batches=len(batches),
+        doc_batch_size=KG_BUILD_DOC_BATCH_SIZE,
+        batch_inference=USE_BATCH_INFERENCE,
+    )
 
     with (
         GraphStoreFactory.for_graph_store(graph_store_uri) as graph_store,
@@ -1269,18 +1344,71 @@ def _run_continuous(
         checkpoint = Checkpoint("continuous")
         ddb.update(ddb_key, {"status": SourceStatus.SCANNING_ENTITY_EXTRACTION})
 
-        try:
-            t0 = time.time()
-            graph_index.extract_and_build(documents, checkpoint=checkpoint, progress_monitor=progress_monitor)
-            elapsed = round(time.time() - t0, 2)
-            logger.info("Continuous build complete", docs=total_docs, elapsed_seconds=elapsed)
-            ddb.update(ddb_key, {"docsGraphIngested": total_docs})
-            return total_docs, 0
-        except Exception:
-            tb = traceback.format_exc()
-            logger.error("Continuous build failed", error=tb)
-            ddb.update(ddb_key, {"status": SourceStatus.SCAN_FAILED, "errorMessage": f"SCAN_FAILED_BUILD: {tb[:500]}"})
-            return 0, total_docs
+        t0 = time.time()
+        docs_ok = 0
+        failed_docs: list[str] = []
+        consecutive_failures = 0
+
+        for batch_num, batch in enumerate(batches, 1):
+            batch_label = f"{batch_num}/{len(batches)}"
+            batch_error = None
+            try:
+                graph_index.extract_and_build(batch, checkpoint=checkpoint, progress_monitor=progress_monitor)
+            except Exception:
+                batch_error = traceback.format_exc()
+
+            # Retries run outside the except block above, so a document's traceback
+            # is its own and not chained onto the batch failure.
+            if batch_error is None:
+                docs_ok += len(batch)
+                consecutive_failures = 0
+            else:
+                logger.warning(
+                    "Document batch failed, retrying its documents one at a time",
+                    batch=batch_label,
+                    docs=len(batch),
+                    error=batch_error,
+                )
+                if not _check_backend_health(graph_store_uri, vector_store_uri, ddb, ddb_key):
+                    raise _BuildAbortedError(f"backend unhealthy after batch {batch_label} failed") from None
+
+                for doc in batch:
+                    try:
+                        graph_index.extract_and_build([doc], checkpoint=checkpoint, progress_monitor=progress_monitor)
+                        docs_ok += 1
+                        consecutive_failures = 0
+                    except Exception:
+                        tb = traceback.format_exc()
+                        failed_docs.append(_doc_label(doc))
+                        consecutive_failures += 1
+                        logger.error("Document failed, skipping it", document=_doc_label(doc), error=tb)
+                        if consecutive_failures >= KG_BUILD_MAX_CONSECUTIVE_DOC_FAILURES:
+                            ddb.update(
+                                ddb_key,
+                                {
+                                    "status": SourceStatus.SCAN_FAILED,
+                                    "errorMessage": (
+                                        f"SCAN_FAILED_BUILD: {consecutive_failures} documents failed in a row, "
+                                        # The tail: the exception itself, not the top frames.
+                                        f"aborting ({docs_ok} ingested). Last error: {tb[-500:]}"
+                                    ),
+                                },
+                            )
+                            raise _BuildAbortedError(
+                                f"{consecutive_failures} consecutive document failures in batch {batch_label}"
+                            ) from None
+
+            ddb.update(ddb_key, {"docsGraphIngested": docs_ok})
+            logger.info("Document batch done", batch=batch_label, docs_ok=docs_ok, docs_failed=len(failed_docs))
+
+        logger.info(
+            "Continuous build complete",
+            docs_ok=docs_ok,
+            docs_failed=len(failed_docs),
+            failed_documents=failed_docs,
+            elapsed_seconds=round(time.time() - t0, 2),
+        )
+        return docs_ok, len(failed_docs)
 
 
 # ---------------------------------------------------------------------------
@@ -1639,6 +1767,12 @@ def main() -> None:
                 ddb_key,
                 progress_monitor,
             )
+    except _BuildAbortedError as exc:
+        # DDB is already SCAN_FAILED with the cause. Exit before the partial-failure
+        # handling below, which would report the documents ingested so far as a
+        # completed run.
+        logger.error("KG Build aborted", reason=str(exc), elapsed_seconds=round(time.time() - start_ts, 2))
+        sys.exit(1)
     finally:
         # Stop beating once the build is done, so the remaining teardown work
         # (version deletion, metrics stamping) isn't interleaved with liveness
