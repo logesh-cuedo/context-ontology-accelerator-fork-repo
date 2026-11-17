@@ -13,6 +13,7 @@ Run these from a worker thread (``asyncio.to_thread``), never on serve's event l
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -23,6 +24,7 @@ class Clients:
         """Wrap serve's OpenSearchVectorClient and BedrockLLMClient."""
         self._vector = vector_client
         self._llm = llm_client
+        self.last_reasoning = ""  # the model's reasoning on the last converse call
 
     def embed(self, text: str) -> list[float]:
         """Titan embedding of ``text`` (the same embedder serve uses)."""
@@ -41,10 +43,22 @@ class Clients:
         return [self._vector._to_hit(r) for r in raw]
 
     def converse(self, prompt: str, *, max_tokens: int, temperature: float, model_id: str | None) -> str:
-        """One Bedrock Converse call; returns the reply text (all text blocks joined)."""
+        """One Bedrock Converse call; returns the reply text (all text blocks joined).
+
+        ENTITY_REASONING_EFFORT=low|medium|high (gpt-oss only) sets how much the model
+        reasons first. Its reasoning is kept in ``self.last_reasoning`` for debugging.
+        """
         kwargs = self._llm._build_converse_kwargs(
             prompt, max_tokens=max_tokens, temperature=temperature, model_id=model_id
         )
+        effort = os.environ.get("ENTITY_REASONING_EFFORT", "")
+        if effort:
+            kwargs["additionalModelRequestFields"] = {"reasoning_effort": effort}
         response = self._llm._call_with_temperature_fallback(self._llm._get_client().converse, kwargs)
         blocks = response.get("output", {}).get("message", {}).get("content", [])
+        self.last_reasoning = "".join(
+            b["reasoningContent"].get("reasoningText", {}).get("text", "")
+            for b in blocks
+            if isinstance(b, dict) and "reasoningContent" in b
+        )
         return "".join(b["text"] for b in blocks if isinstance(b, dict) and "text" in b)

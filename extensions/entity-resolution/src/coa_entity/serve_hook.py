@@ -106,6 +106,7 @@ class EntityHook:
         pointer = self.pointer_for(namespace)
         index = pointer.index if pointer else index_name(self._collection, namespace)  # no pointer: older index
         matcher = self.matcher_for(pointer, namespace)
+        self._clients.last_reasoning = ""
         resolution = resolve_entities(
             self._clients,
             query,
@@ -116,14 +117,18 @@ class EntityHook:
             embedding=embedding,
             model_id=model_id,
         )
+        detail: dict[str, Any] = {
+            "status": resolution.status,
+            "entities": resolution.by_kind(),
+            **({"reason": resolution.reason} if resolution.reason else {}),
+        }
+        if os.environ.get("ENTITY_REASONING_EFFORT") and self._clients.last_reasoning:
+            # Debugging only: the model's reasoning goes into the trace (ask.py prints it).
+            detail["reasoning"] = self._clients.last_reasoning
         step = {
             "status": "skipped" if resolution.status == "skipped" else "success",
             "ms": int((time.perf_counter() - start) * 1000),
-            "detail": {
-                "status": resolution.status,
-                "entities": resolution.by_kind(),
-                **({"reason": resolution.reason} if resolution.reason else {}),
-            },
+            "detail": detail,
         }
         if resolution.needs_clarification:
             return Tier2Outcome(clarification=resolution.clarification), step
