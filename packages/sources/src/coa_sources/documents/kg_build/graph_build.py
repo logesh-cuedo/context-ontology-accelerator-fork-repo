@@ -938,6 +938,57 @@ def _patch_graphrag_bulk_ingest_retry() -> None:
     _graphrag_bulk_ingest_patched = True
 
 
+_graphrag_cypher_quoting_patched = False
+
+
+def _escape_cypher_string(value: str) -> str:
+    """Escape a value for use inside a single-quoted openCypher string literal.
+
+    Backslash first, so the backslashes added for quotes are not doubled again.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _patch_graphrag_cypher_text_quoting() -> None:
+    """Escape quotes in the text values graphrag inlines into openCypher filters.
+
+    graphrag 3.18.7 renders a text metadata filter as ``f"'{x}'"`` with no escaping
+    (``storage/graph/graph_utils.py``, ``formatter_for_type``). Versioning runs one
+    such filter per document — ``source.source_s3_key = '<key>'`` in
+    ``VersionManager._get_existing_source_nodes`` — so a single apostrophe in an S3
+    key ends the string literal early and Neptune rejects the whole query with
+    MalformedQueryException. Nothing catches it, so one file named after
+    "Capacit'e Infraprojects Ltd." failed an entire ingest.
+
+    Wraps the module's ``formatter_for_type`` and replaces only the ``text`` branch;
+    timestamp and number formatting are left to upstream. graph_utils resolves the
+    name at call time, so every filter it builds — the ingest-time versioning query
+    and the retrieval-time source filters — picks this up.
+
+    Separate flag + narrow import so an ImportError here can't disable the other
+    patches. Applied in the main process before the build pipeline forks its
+    workers, like its siblings.
+    """
+    global _graphrag_cypher_quoting_patched
+    if _graphrag_cypher_quoting_patched:
+        return
+    try:
+        import graphrag_toolkit.lexical_graph.storage.graph.graph_utils as _gu
+    except (ImportError, AttributeError):
+        logger.debug("graphrag cypher quoting patch skipped (module not available)")
+        return
+
+    upstream_formatter_for_type = _gu.formatter_for_type
+
+    def _escaping_formatter_for_type(type_name: str):
+        if type_name == "text":
+            return lambda x: f"'{_escape_cypher_string(str(x))}'"
+        return upstream_formatter_for_type(type_name)
+
+    _gu.formatter_for_type = _escaping_formatter_for_type
+    _graphrag_cypher_quoting_patched = True
+
+
 def _setup_graphrag(tenant_id: str):
     """Configure GraphRAG and return (graph_store_uri, vector_store_uri)."""
     # Patch BEFORE importing graphrag — the monkey-patch must replace index_exists
@@ -945,6 +996,7 @@ def _setup_graphrag(tenant_id: str):
     # bind their own references to it. Importing GraphRAGConfig triggers those loads.
     _patch_graphrag_toolkit_for_aoss_nextgen()
     _patch_graphrag_paginated_search_retry()
+    _patch_graphrag_cypher_text_quoting()
     # Rebinds module constants that llm_cache reads at call time, so this one is not
     # order-sensitive the way the others are — kept here so all the patches are in
     # one place rather than split across the import.

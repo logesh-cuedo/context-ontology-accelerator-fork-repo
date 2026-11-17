@@ -1655,6 +1655,100 @@ class TestPaginatedSearchRetryPatch:
             mod._patch_graphrag_paginated_search_retry()  # must not raise
 
 
+class TestCypherTextQuotingPatch:
+    """_patch_graphrag_cypher_text_quoting escapes quotes in the text values graphrag
+    inlines into openCypher filters. Unescaped, the versioning query for an S3 key
+    containing an apostrophe ("Capacit'e Infraprojects Ltd.") was malformed and
+    Neptune's MalformedQueryException failed the whole build."""
+
+    CAPACITE_KEY = "AR-Concalls/ingest/v1/Capacit'e Infraprojects Ltd. (285668)/AR_FY2024-25.md"
+
+    def _make_graph_utils_stub(self):
+        gu = types.ModuleType("graphrag_toolkit.lexical_graph.storage.graph.graph_utils")
+        # Same shape as upstream: the filter builder looks formatter_for_type up in
+        # its module globals at call time, which is what the patch relies on.
+        exec(
+            "def formatter_for_type(type_name):\n"
+            "    if type_name == 'text':\n"
+            "        return lambda x: f\"'{x}'\"\n"
+            "    if type_name == 'number':\n"
+            "        return lambda x: x\n"
+            "    raise ValueError(type_name)\n"
+            "\n"
+            "def equals_filter(key, value):\n"
+            "    return f'(source.{key} = {formatter_for_type(\"text\")(value)})'\n",
+            gu.__dict__,
+        )
+        return gu
+
+    def _graphrag_modules(self, gu):
+        storage_stub = sys.modules["graphrag_toolkit.lexical_graph.storage"]
+        graph_stub = types.ModuleType("graphrag_toolkit.lexical_graph.storage.graph")
+        graph_stub.graph_utils = gu
+        storage_stub.graph = graph_stub
+        return {
+            "graphrag_toolkit.lexical_graph.storage.graph": graph_stub,
+            "graphrag_toolkit.lexical_graph.storage.graph.graph_utils": gu,
+        }
+
+    def test_escape_cypher_string(self, mod):
+        assert mod._escape_cypher_string("Capacit'e") == "Capacit\\'e"
+        assert mod._escape_cypher_string("no quotes") == "no quotes"
+        # Backslash is escaped first, so an existing "\'" cannot re-open the string.
+        assert mod._escape_cypher_string("a\\'b") == "a\\\\\\'b"
+
+    def test_apostrophe_in_s3_key_stays_inside_the_literal(self, mod):
+        gu = self._make_graph_utils_stub()
+        with patch.dict(sys.modules, self._graphrag_modules(gu)):
+            mod._graphrag_cypher_quoting_patched = False
+            mod._patch_graphrag_cypher_text_quoting()
+            assert mod._graphrag_cypher_quoting_patched is True
+
+            clause = gu.equals_filter("source_s3_key", self.CAPACITE_KEY)
+            assert clause == (
+                "(source.source_s3_key = "
+                "'AR-Concalls/ingest/v1/Capacit\\'e Infraprojects Ltd. (285668)/AR_FY2024-25.md')"
+            )
+
+    def test_values_without_quotes_are_unchanged(self, mod):
+        gu = self._make_graph_utils_stub()
+        upstream_text = gu.formatter_for_type("text")
+        with patch.dict(sys.modules, self._graphrag_modules(gu)):
+            mod._graphrag_cypher_quoting_patched = False
+            mod._patch_graphrag_cypher_text_quoting()
+            key = "AR-Concalls/ingest/v1/Bharat Forge Ltd. (100493)/AR_FY2024-25.md"
+            assert gu.formatter_for_type("text")(key) == upstream_text(key)
+
+    def test_non_text_types_delegate_to_upstream(self, mod):
+        gu = self._make_graph_utils_stub()
+        with patch.dict(sys.modules, self._graphrag_modules(gu)):
+            mod._graphrag_cypher_quoting_patched = False
+            mod._patch_graphrag_cypher_text_quoting()
+            assert gu.formatter_for_type("number")(42) == 42
+            with pytest.raises(ValueError):
+                gu.formatter_for_type("unsupported")
+
+    def test_patch_is_idempotent(self, mod):
+        gu = self._make_graph_utils_stub()
+        with patch.dict(sys.modules, self._graphrag_modules(gu)):
+            mod._graphrag_cypher_quoting_patched = False
+            mod._patch_graphrag_cypher_text_quoting()
+            first = gu.formatter_for_type
+            mod._patch_graphrag_cypher_text_quoting()
+            assert gu.formatter_for_type is first
+            # Not wrapped twice: a quote is escaped exactly once.
+            assert gu.formatter_for_type("text")("a'b") == "'a\\'b'"
+
+    def test_patch_noop_when_module_unavailable(self, mod):
+        mod._graphrag_cypher_quoting_patched = False
+        with patch.dict(
+            sys.modules,
+            {"graphrag_toolkit.lexical_graph.storage.graph.graph_utils": None},
+        ):
+            mod._patch_graphrag_cypher_text_quoting()  # must not raise
+        assert mod._graphrag_cypher_quoting_patched is False
+
+
 class TestBulkIngestRetryPatch:
     """_patch_graphrag_bulk_ingest_retry replaces OpensearchVectorClient._bulk_ingest_embeddings
     with a version that retries transient AOSS circuit-breaker 429/503 items with
