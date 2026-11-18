@@ -23,6 +23,7 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 import structlog
@@ -232,6 +233,41 @@ _SHARED_RULES = (
     "differently between runs\n"
     "- Write date/time literals in full zero-padded ISO form (e.g. '2019-08-20', not "
     "'2019-8-20')\n"
+    # Period handling. Without these the model has no "now" to count back from, so a
+    # relative window ("last 3 years") degrades into each row's own latest periods —
+    # measured as six different fiscal years in one answer, none of them a 3-year window.
+    "- A fiscal year is written FY<yy> and ends in the company's fiscal year-end month, "
+    "NOT on 31 December. Period columns named yyyymm encode that year-end as "
+    "YYYY + zero-padded month, so for a March year-end FY24 is 202403, FY23 is 202303. "
+    "Resolve a relative window ('last 3 years', 'since FY22') against the current date "
+    "above YOURSELF, before writing the query: work out the fiscal years it means and "
+    "write them into the SQL as literals (WHERE p.fy IN (2026, 2025, 2024)). The "
+    "window's bounds must be integer literals you computed — never a column, a "
+    "subquery, a CTE or an expression. In particular do NOT derive them with ORDER BY "
+    "<period> DESC LIMIT n, with MAX/MIN of a period column, or from any column whose "
+    "name contains latest, max, last, current or recent (e.g. latest_fy_end_yyyymm, "
+    "max_year): all of those give each company its OWN last years, so a company whose "
+    "data ended in 2024 silently answers about different years than one reporting into "
+    "2026, and the question asked for one window. A year in the window with no row is "
+    "simply absent from the result, which is correct — never widen the window, relax "
+    "the filter, or fall back to a per-company latest in order to return n rows\n"
+    # Join handling. dim_period holds one row per (fye_month, yyyymm): joining on yyyymm
+    # alone matches every year-end month, multiplying rows and stamping the wrong fy on
+    # them — measured at 36 rows, all mislabelled, for a 3-row question.
+    "- Return ONE row per entity per period. Where a fact table's grain is finer than "
+    "one row per company per period — it has a basis/variant column such as "
+    "time_series_type, data_source or flag — two rows for the same company and year "
+    "are two DIFFERENT measurements, and showing both looks like duplicated data. A "
+    "LIKE pattern over such a column ('Year Ended %') is NOT enough: it still matches "
+    "several variants. Pin the column to ONE exact allowed value, or pick one row per "
+    "company-period deterministically, so the same company and fiscal year never "
+    "appears twice with different values. When the schema does not show which value to "
+    "pin, prefer a table whose primary key is already (company_id, period)\n"
+    "- dim_period is keyed on BOTH fye_month AND yyyymm. Join it on both columns, taking "
+    "fye_month from dim_company_fye for the same company "
+    "(JOIN dim_company_fye c ON f.company_id = c.company_id JOIN dim_period p "
+    "ON p.fye_month = c.fye_month AND p.yyyymm = f.yyyymm). Joining on yyyymm alone "
+    "duplicates every row and mislabels its fiscal year\n"
     "- Use SELECT DISTINCT when the question asks to list/find entities that could "
     "repeat across joined rows\n"
     "- Return the SQL in a ```sql code block\n"
@@ -270,6 +306,9 @@ def _build_system_prompt(dialect: str) -> str:
     return (
         f"You are a SQL query generator for a data warehouse running on "
         f"{config['engine_description']}.\n\n"
+        # Read at call time, not import time: a long-lived process would otherwise
+        # answer "this year" with the date it started on.
+        f"Today's date is {datetime.now(UTC).date().isoformat()}.\n\n"
         f"CRITICAL RULES:\n"
         f"{_SHARED_RULES}\n"
         f"{config['syntax_rules']}\n\n"
@@ -923,7 +962,9 @@ class SQLGenerator:
         )
 
         _warn_if_truncated(result, max_tokens, step="generate")
-        return _extract_sql(result.text), _extract_confidence(result.text)
+        _sqlprobe = _extract_sql(result.text)
+        logger.info("sql_probe", question=question[:100], sql=_sqlprobe)
+        return _sqlprobe, _extract_confidence(result.text)
 
 
 def _warn_if_truncated(result: ConverseResult, max_tokens: int, *, step: str) -> None:

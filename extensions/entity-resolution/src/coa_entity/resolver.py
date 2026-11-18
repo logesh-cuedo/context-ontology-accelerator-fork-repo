@@ -516,6 +516,17 @@ def resolve_entities(
     # re-derive it — or contradict the person who chose. A typed answer ("bajaj auto")
     # matches no name exactly, so it still goes the long way round and the model decides.
     if matcher is not None and CLARIFICATION_PREFIX in query and (picked := _picked_options(matcher, query)):
+        # The question may have named other companies besides the ambiguous one we asked
+        # about ("tata steel and jsw steel ..."). Only the ambiguous name was put to the
+        # user, so returning their pick alone answered a two-company question with one.
+        # Any name in the question that identifies exactly one entity is added back; an
+        # ambiguous name is absent from that index, which is why it was asked about.
+        keys = {(c.kind, c.key) for c in picked}
+        for _, entries in _names_in(matcher, query.split(CLARIFICATION_PREFIX)[0]):
+            entry = entries[0]
+            if (entry.kind, entry.key) not in keys:
+                keys.add((entry.kind, entry.key))
+                picked.append(_from_name_entry(entry))
         logger.info("entity_clarification_picked", namespace=namespace, entities=[c.name for c in picked])
         return EntityResolution(status="found", chosen=picked)
 
