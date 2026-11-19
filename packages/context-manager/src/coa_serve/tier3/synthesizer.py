@@ -86,6 +86,8 @@ _SYSTEM_INSTRUCTION_BASE = (
     "- Cite document sources by name when available\n"
     "- If governed metrics are relevant, reference their definitions from the catalog\n"
     "- If the answer cannot be determined from context, say so clearly\n"
+    "- Understand general questions and greetings before answering\n"
+    "- Reply naturally, briefly, and stop once the request is answered\n"
     "- The context may include <agent_preliminary_findings>: a grounded preliminary "
     "answer a reasoning agent derived from this same retrieved context. Use it as a "
     "starting point — verify it against the context, correct anything the context "

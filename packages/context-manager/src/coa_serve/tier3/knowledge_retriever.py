@@ -210,7 +210,7 @@ class KnowledgeRetriever:
             results[name] = gathered[i]
 
         # Extract results with fallback for failures
-        vec_chunks = []
+        vec_chunks: list = []
         if "vector_search" in results:
             vec_result, vec_ms = results["vector_search"]
             vec_chunks, vec_trace = self._classify_result(
@@ -237,7 +237,7 @@ class KnowledgeRetriever:
             )
             trace.record(StepId.T3_VECTOR_SEARCH, "skipped", 0, detail=detail, parallel_group=StepId.T3_RETRIEVE)
 
-        graph_entities = []
+        graph_entities: list = []
         if "graph_traverse" in results:
             graph_result, graph_ms = results["graph_traverse"]
             graph_entities, graph_trace = self._classify_result(
@@ -407,6 +407,9 @@ class KnowledgeRetriever:
                 from ..lexical.strategies import STRATEGY_REGISTRY
 
                 spec = STRATEGY_REGISTRY[retriever_strategy]
+            # Guarded by the caller (``_lexical is not None`` before dispatch);
+            # assert so the type checker narrows the Optional here too.
+            assert self._lexical is not None
             baseline_result = await self._lexical.retrieve(query, namespace, strategy=spec)
             trace_steps.extend(baseline_result.trace_steps)
             for s in baseline_result.trace_steps:

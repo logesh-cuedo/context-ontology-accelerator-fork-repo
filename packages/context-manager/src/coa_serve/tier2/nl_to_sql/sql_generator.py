@@ -208,6 +208,8 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
 }
 
 _SHARED_RULES = (
+    "- for greeting like hi , how are you or any general message or greetings reply accordingly\n"
+    "- Understand general questions and greetings before answering\n"
     "- Use ONLY the tables and columns provided in the schema — NEVER invent names\n"
     "- When a column lists 'allowed values: [...]', filter it using one of those "
     "exact literals (matching case); do not alter case or invent a value\n"
@@ -244,7 +246,9 @@ _SHARED_RULES = (
     "write them into the SQL as literals (WHERE p.fy IN (2026, 2025, 2024)). The "
     "window's bounds must be integer literals you computed — never a column, a "
     "subquery, a CTE or an expression. In particular do NOT derive them with ORDER BY "
-    "<period> DESC LIMIT n, with MAX/MIN of a period column, or from any column whose "
+    "<period> DESC LIMIT n, with MAX/MIN of a period column, with a ranking window "
+    "partitioned by the entity (ROW_NUMBER/RANK/DENSE_RANK OVER (PARTITION BY "
+    "<company> ORDER BY <period> DESC) filtered to rn <= n), or from any column whose "
     "name contains latest, max, last, current or recent (e.g. latest_fy_end_yyyymm, "
     "max_year): all of those give each company its OWN last years, so a company whose "
     "data ended in 2024 silently answers about different years than one reporting into "

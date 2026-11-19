@@ -499,7 +499,7 @@ def get_graph_uri_template(override: str | None = None) -> str:
     Raises:
         ValueError: If the resolved template is non-empty but missing the ``{namespace}`` placeholder.
     """
-    result = override or os.environ.get("GRAPH_URI_TEMPLATE", "")
+    result: str = override or os.environ.get("GRAPH_URI_TEMPLATE", "") or ""
     if result and "{namespace}" not in result:
         raise ValueError(f"GRAPH_URI_TEMPLATE must contain '{{namespace}}' placeholder, got: {result!r}")
     return result
