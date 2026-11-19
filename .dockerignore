@@ -18,6 +18,9 @@
 # cuedo-ext: entity-resolution extension (installed last by the serve Dockerfile)
 !extensions/entity-resolution/pyproject.toml
 !extensions/entity-resolution/src/
+# cuedo-ext: answer-consistency extension (installed last by the serve Dockerfile)
+!extensions/answer-consistency/pyproject.toml
+!extensions/answer-consistency/src/
 
 # Allow MCP server package (same image, different entrypoint)
 !packages/mcp-server/pyproject.toml

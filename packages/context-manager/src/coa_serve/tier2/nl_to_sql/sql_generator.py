@@ -482,6 +482,7 @@ class SQLGenerator:
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
         pinned_tables: list[str] | None = None,  # cuedo-ext: governed metric's tables
+        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -512,6 +513,8 @@ class SQLGenerator:
                 (extensions/entity-resolution). Empty → no section.
             pinned_tables: cuedo-ext — a forwarded governed metric's tables, added to
                 the retrieved classes when similarity missed them.
+            top_p: cuedo-ext — answer-consistency nucleus-sampling cutoff for the
+                SQL-writing call (extensions/answer-consistency). None → not sent.
         """
         trace: list[dict[str, Any]] = []
 
@@ -720,6 +723,7 @@ class SQLGenerator:
                 dialect=dialect,
                 governed_metric=governed_metric,
                 entities=entities,  # cuedo-ext
+                top_p=top_p,  # cuedo-ext
             )
             trace.append({"step": "generate_sql", "status": "ok", "ms": _ms(start), "confidence": confidence})
         except Exception as e:
@@ -805,6 +809,7 @@ class SQLGenerator:
         model_id: str | None = None,
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
+        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
     ) -> tuple[str, float]:
         """LLM-driven repair of a SQL statement that failed to execute.
 
@@ -863,6 +868,7 @@ class SQLGenerator:
             system=self._system_prompt,
             max_tokens=max_tokens,
             temperature=0,
+            top_p=top_p,  # cuedo-ext
             model_id=model_id,
         )
         _warn_if_truncated(result, max_tokens, step="correct")
@@ -894,6 +900,7 @@ class SQLGenerator:
         feedback: str = "",
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
+        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
     ) -> tuple[str, float, dict[str, str]]:
         """Call LLM to generate SQL from question and DDL context.
 
@@ -915,6 +922,7 @@ class SQLGenerator:
                 chars. Given, the writer extends the governed formula instead of
                 reinventing one.
             entities: cuedo-ext — entity-resolution prompt section. Empty → none.
+            top_p: cuedo-ext — answer-consistency sampling cutoff. None → not sent.
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -988,6 +996,7 @@ class SQLGenerator:
             system=system_prompt,
             max_tokens=max_tokens,
             temperature=0,
+            top_p=top_p,  # cuedo-ext
             model_id=model_id,
             guardrail_id=self._effective_guardrail_id(),
             # Sent unconditionally: this is the ONLY channel for the user's
