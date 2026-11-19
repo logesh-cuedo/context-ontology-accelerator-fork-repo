@@ -491,6 +491,7 @@ class NLtoSQLStrategy:
                     retrieved_tables=nl_to_sql_result.retrieved_tables,
                     expanded_tables=nl_to_sql_result.expanded_tables,
                     data_source_id=nl_to_sql_result.data_source_id or "",
+                    column_direction=nl_to_sql_result.column_direction,
                 )
                 tables = tables_visible_to(
                     nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables, profile

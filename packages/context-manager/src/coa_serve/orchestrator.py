@@ -815,6 +815,7 @@ class Orchestrator:
                     # filtered the same way where they are recorded).
                     retrieved_tables=tables_visible_to(result.retrieved_tables, profile),
                     expanded_tables=tables_visible_to(result.expanded_tables, profile),
+                    column_direction=result.column_direction,
                     trace=trace,
                     namespace=namespace,
                     principal=display_principal(profile),

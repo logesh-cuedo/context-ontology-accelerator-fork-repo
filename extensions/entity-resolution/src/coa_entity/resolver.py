@@ -44,6 +44,10 @@ CLARIFICATION_PREFIX = "\nUser clarification:"  # the user's answer is added aft
 
 _MAX_OPTIONS = 6
 _NAME_MATCHES_PER_KIND = 8  # extra name matches per kind, on top of the search results
+# How close a second name match must score to the best one to count as "equally
+# good". 0.95 keeps it to genuine ties — several entities sharing the one word the
+# user actually wrote — rather than merely close runners-up.
+_TIE_RATIO = 0.95
 _STATUSES = {"found", "no_entity", "not_found", "ambiguous"}
 # How far back a follow-up may refer. Three turns covers "compare both" after the
 # question that named the entities; more mostly adds entities the user has moved on
@@ -356,6 +360,14 @@ def _carried_choice(matcher: dict, history: list[dict[str, str]] | None) -> list
     misread, arriving a turn late and attached to a question that looks answered.
     """
     for turn in reversed(history or []):
+        # The answer turn records the names resolution settled on. Reading those is
+        # the only way a misspelled name survives: the question beside it says
+        # "relaience", which no lookup over the catalog can find, so the carry came
+        # back empty and the follow-up answered about every company in the namespace.
+        if turn.get("role") == "assistant":
+            if named := _picked_answer(matcher, "; ".join(turn.get("resolved_entities") or [])):
+                return named
+            continue
         if turn.get("role") != "user":
             continue
         content = str(turn.get("content") or "")
@@ -387,6 +399,7 @@ def _selection_prompt(
     candidates: list[EntityCandidate],
     kinds: list[KindInfo],
     history_block: str = "",
+    tie_block: str = "",
 ) -> str:
     names = ", ".join(k.type for k in kinds)
     groups = [k.type for k in kinds if k.is_group]
@@ -454,6 +467,7 @@ def _selection_prompt(
         f"{history_section}"
         f"## Question\n<question>{query}</question>\n\n"
         f"## Candidates\n{lines}\n\n"
+        f"{tie_block}"
         "## Decide one status\n"
         '- "no_entity": the question names no specific entity at all (e.g. "top 10 companies '
         'by revenue", "total PAT of all companies"). The candidates are then irrelevant.\n'
@@ -467,7 +481,11 @@ def _selection_prompt(
         "SEPARATE entities with different data, so where nothing says which, ask; never pick "
         "one as the obvious reading, and never answer with both. What the user has already "
         "told you does say which: if the earlier questions below settle it, that is not "
-        "ambiguous, so use their answer instead of asking it again.\n"
+        "ambiguous, so use their answer instead of asking it again. A question may name "
+        "SEVERAL entities where only one of them is ambiguous — the status describes the "
+        "whole question, so report \"ambiguous\" and ALSO put every entity you did settle "
+        'in "chosen". Leaving them out drops them from the answer: a two-company question '
+        "comes back about one company.\n"
         '- "not_found": the question names an entity that matches NO candidate.\n\n'
         f"{group_rules}"
         f"{carry_over_rule}"
@@ -475,9 +493,17 @@ def _selection_prompt(
         "## Output — one JSON object, nothing else\n"
         "{\n"
         '  "status": "found" | "no_entity" | "ambiguous" | "not_found",\n'
-        '  "chosen": ["E1"],                      // found: the chosen candidate labels\n'
+        '  "chosen": ["E1"],                      // found: the chosen candidate labels; on '
+        '"ambiguous" ALSO list every entity the question names that you DID settle, so the '
+        "user is not asked about those again\n"
         '  "mention": "bajaj",                    // ambiguous/not_found: the name as written\n'
         '  "ambiguous_candidates": ["E1", "E2"],  // ambiguous: the candidates it could be\n'
+        '  "ambiguous_by_mention": {              // ambiguous: EVERY unclear name, each '
+        "with its own candidates. Fill this whenever the question leaves more than one "
+        "name unclear, so the user is asked about all of them at once instead of being "
+        'asked again on the next turn\n'
+        '    "bajaj": ["E1", "E2"], "reliance": ["E3", "E4"]\n'
+        '  },\n'
         '  "refers_back": false                   // true if it refers to an earlier '
         'question\'s entity: on "no_entity" rather than asking about every entity, on '
         '"found" when it ALSO names one of its own (a comparison)\n'
@@ -485,10 +511,16 @@ def _selection_prompt(
     )
 
 
-def _numbered(candidates: list[EntityCandidate], offer_all: bool = False) -> str:
-    lines = [f"{i}. {c.label}" for i, c in enumerate(candidates, start=1)]
+def _numbered(candidates: list[EntityCandidate], offer_all: bool = False, start: int = 1) -> str:
+    """The numbered options list, continuing from ``start``.
+
+    ``start`` carries the numbering across blocks, so two ambiguous names asked in
+    one message give the user one unbroken set of numbers to answer with rather than
+    two lists both beginning at 1.
+    """
+    lines = [f"{i}. {c.label}" for i, c in enumerate(candidates, start=start)]
     if offer_all:
-        lines.append(f"{len(candidates) + 1}. {ALL_OPTION}")
+        lines.append(f"{start + len(candidates)}. {ALL_OPTION}")
     return "\n".join(lines)
 
 
@@ -522,11 +554,27 @@ def resolve_entities(
         # Any name in the question that identifies exactly one entity is added back; an
         # ambiguous name is absent from that index, which is why it was asked about.
         keys = {(c.kind, c.key) for c in picked}
-        for _, entries in _names_in(matcher, query.split(CLARIFICATION_PREFIX)[0]):
+        original = query.split(CLARIFICATION_PREFIX)[0]
+        for _, entries in _names_in(matcher, original):
             entry = entries[0]
             if (entry.kind, entry.key) not in keys:
                 keys.add((entry.kind, entry.key))
                 picked.append(_from_name_entry(entry))
+        # ``_names_in`` finds only names written out in full, so a company the user
+        # named by its acronym ("tcs") was not added back and the answer came out
+        # about the clarified company alone. Scoring the original question finds it
+        # the same way the main path does. Only a clear winner is taken: a run-away
+        # top score with nothing close behind it is one entity the question names
+        # outright, whereas several near-equal scores are the ambiguity that was
+        # asked about — and re-adding those would answer with the very companies
+        # the user just declined.
+        scored = sorted(match(matcher, original, {k.type: _MAX_OPTIONS for k in kinds}), key=lambda t: -t[1])
+        for pos, (entry, score) in enumerate(scored):
+            runner_up = scored[pos + 1][1] if pos + 1 < len(scored) else 0.0
+            if (entry.kind, entry.key) in keys or runner_up >= score * _TIE_RATIO:
+                continue
+            keys.add((entry.kind, entry.key))
+            picked.append(_from_name_entry(entry))
         logger.info("entity_clarification_picked", namespace=namespace, entities=[c.name for c in picked])
         return EntityResolution(status="found", chosen=picked)
 
@@ -584,21 +632,65 @@ def resolve_entities(
 
     # 1c. Put the lists together, per kind: name matches first (they use the user's own
     #     words), then search results. No duplicates.
-    named = by_name
+    #
+    # Reranked, not merely concatenated. The two lists score on scales that cannot be
+    # compared — lexical is an idf-weighted sum scaled by name coverage, unbounded;
+    # vector is a cosine in 0..1 — so a fused number would be meaningless. Instead each
+    # list is sorted by its own score and a candidate found by BOTH is lifted to the
+    # front of its kind: agreement between an independent name match and a semantic one
+    # is the strongest signal available, and it is the one thing concatenation threw
+    # away. Previously the scores were computed and then discarded, so the model saw a
+    # flat list in which a strong match and a stray lookalike were indistinguishable.
+    named = sorted(by_name, key=lambda c: -c.score)
+    both = {(c.kind, c.key) for c in named} & {(c.kind, c.key) for hits in vector_hits.values() for c in hits}
     candidates: list[EntityCandidate] = []
     seen: set[tuple[str, str]] = set()
     for kind in dict.fromkeys([*vector_hits, *(c.kind for c in named)]):
-        for c in [*(c for c in named if c.kind == kind), *vector_hits.get(kind, [])]:
+        ranked = [
+            *(c for c in named if c.kind == kind and (c.kind, c.key) in both),
+            *(c for c in named if c.kind == kind and (c.kind, c.key) not in both),
+            *sorted(vector_hits.get(kind, []), key=lambda c: -c.score),
+        ]
+        for c in ranked:
             if (c.kind, c.key) not in seen:
                 seen.add((c.kind, c.key))
                 candidates.append(c)
     if not candidates:
         return EntityResolution(status="skipped", reason="entity index empty")
 
+    # A name the user misspelled or shortened can match several entities on the SAME
+    # single word ("reliance" in Reliance Industries, Power, Infrastructure, …). Those
+    # score identically, so which one wins is decided by the sort's tiebreak — name
+    # length — which is arbitrary and not reproducible across runs. Measured: one
+    # question resolved to four different companies on four identical attempts, one of
+    # them a merged shell with no recent data. Where the top name matches of a kind are
+    # within a hair of each other, the question genuinely does not say which, so the
+    # model is told to ask rather than to pick the one that sorted first.
+    tied: dict[str, list[EntityCandidate]] = {}
+    for kind in {c.kind for c in named}:
+        ranked = [c for c in named if c.kind == kind]
+        if len(ranked) >= 2 and ranked[0].score > 0 and ranked[1].score >= ranked[0].score * _TIE_RATIO:
+            tied[kind] = [c for c in ranked if c.score >= ranked[0].score * _TIE_RATIO][:_MAX_OPTIONS]
+    tie_block = ""
+    if tied:
+        lines_ = "\n".join(
+            f"- {kind}: " + ", ".join(c.name for c in cs) for kind, cs in tied.items()
+        )
+        tie_block = (
+            "## Equally good name matches\n"
+            "These candidates matched the question's wording EQUALLY well — the name as "
+            "written does not distinguish them:\n"
+            f"{lines_}\n"
+            'If the question names one of these and nothing in it decides which, that is '
+            '"ambiguous" — list them in "ambiguous_candidates" and ask. Do not pick one '
+            "because it is the largest or best known company; the user's words did not say "
+            "so, and guessing returns another company's numbers as if they were theirs.\n\n"
+        )
+
     # 2. Ask Bedrock to choose. Its reply should contain one JSON object.
     try:
         text = clients.converse(
-            _selection_prompt(query, candidates, kinds, history_block),
+            _selection_prompt(query, candidates, kinds, history_block, tie_block),
             max_tokens=1500,
             temperature=0.0,
             model_id=model_id,
@@ -640,7 +732,12 @@ def resolve_entities(
         matcher is not None
         and status == "no_entity"
         and choice.get("refers_back") is True
-        and (pinned := _pinned_choice(matcher, history))
+        # A clarification settles it where there was one; otherwise the earlier turn
+        # does, read from what it RESOLVED to rather than from the words it was asked
+        # in. Only the clarified reading was consulted here, so a question answered
+        # without asking — including one whose name was misspelled — left the follow-up
+        # with nobody to carry, and it answered about every company in the namespace.
+        and (pinned := _pinned_choice(matcher, history) or _carried_choice(matcher, history))
     ):
         logger.info("entity_pinned", namespace=namespace, status=status, entities=[c.name for c in pinned])
         return EntityResolution(status="found", chosen=pinned)
@@ -665,13 +762,58 @@ def resolve_entities(
         if not chosen:
             status = "not_found"  # "found" but no valid label: ask the user instead of guessing
     if status == "ambiguous":
+        # A question can leave SEVERAL names ambiguous at once ("pat for bajaj and
+        # reliance"). "ambiguous_candidates" is one flat list and "mention" one name,
+        # so the model had to choose which to ask about and the other was guessed or
+        # dropped. "ambiguous_by_mention" groups the candidates under the name each
+        # belongs to, so every unresolved name is asked in the same message; the flat
+        # field stays the fallback for a reply that does not use the grouped one.
+        groups: list[tuple[str, list[EntityCandidate]]] = []
+        raw_groups = choice.get("ambiguous_by_mention")
+        if isinstance(raw_groups, dict):
+            for name, labels in raw_groups.items():
+                opts = chosen_from(labels)[:_MAX_OPTIONS]
+                if len(opts) >= 2:
+                    groups.append((str(name).strip() or mention, opts))
         options = chosen_from(choice.get("ambiguous_candidates"))[:_MAX_OPTIONS]
-        if len(options) >= 2:
-            all_groups = all((info := config.kind(o.kind)) is not None and info.is_group for o in options)
+        if len(groups) > 1:
+            asked = {(o.kind, o.key) for _, opts in groups for o in opts}
+            settled = [c for c in chosen_from(choice.get("chosen")) if (c.kind, c.key) not in asked]
+            kept = f" (keeping {', '.join(c.name for c in settled)})" if settled else ""
+            blocks, offset = [], 0
+            for name, opts in groups:
+                all_groups = all((info := config.kind(o.kind)) is not None and info.is_group for o in opts)
+                blocks.append(
+                    f"**{name}** matches more than one entry:\n\n"
+                    f"{_numbered(opts, offer_all=all_groups, start=offset + 1)}"
+                )
+                offset += len(opts) + (1 if all_groups else 0)
             resolution = EntityResolution(
                 status="ambiguous",
+                chosen=settled,
                 clarification=(
-                    f"**{mention}** matches more than one entry. Which one did you mean?\n\n"
+                    f"Two names in your question match more than one entry{kept}. "
+                    f"Which did you mean?\n\n" + "\n\n".join(blocks) + f"\n\n{CLARIFICATION_MARKER}"
+                ),
+            )
+        elif len(options) >= 2:
+            all_groups = all((info := config.kind(o.kind)) is not None and info.is_group for o in options)
+            # A question can name one entity plainly and another ambiguously
+            # ("tax for relaience and tcs"): the status is a single value for the
+            # WHOLE question, so the model reports "ambiguous" and its "chosen"
+            # list still holds the entities it did settle. Reading only the
+            # ambiguous options dropped those silently — a two-company question
+            # came back resolved to one. Carry them on the resolution (the
+            # options are never among them) and name them in the question we ask,
+            # so the user can see nothing was lost while they pick.
+            asked_keys = {(o.kind, o.key) for o in options}
+            settled = [c for c in chosen_from(choice.get("chosen")) if (c.kind, c.key) not in asked_keys]
+            kept = f" (keeping {', '.join(c.name for c in settled)})" if settled else ""
+            resolution = EntityResolution(
+                status="ambiguous",
+                chosen=settled,
+                clarification=(
+                    f"**{mention}** matches more than one entry{kept}. Which one did you mean?\n\n"
                     f"{_numbered(options, offer_all=all_groups)}\n\n{CLARIFICATION_MARKER}"
                 ),
             )
@@ -701,6 +843,8 @@ def resolve_entities(
         "entity_resolved",
         namespace=namespace,
         status=resolution.status,
+        lexical_names=[f"{c.name}:{c.score:.3f}" for c in named[:8]],
+        tied=list(tied),
         entities=resolution.by_kind(),
         candidates=len(candidates),
         lexical=len(by_name),

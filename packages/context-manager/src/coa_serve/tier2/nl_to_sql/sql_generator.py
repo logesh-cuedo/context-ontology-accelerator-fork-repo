@@ -162,6 +162,11 @@ def _resolve_graph_expand_max_tables() -> int:
 
 _SQL_CODE_BLOCK_RE = re.compile(r"```(?:sql)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 _CONFIDENCE_RE = re.compile(r"confidence:\s*([01](?:\.\d+)?)", re.IGNORECASE)
+# The writer's per-column favourability line (see the generate prompt): one
+# "Direction:" line of <column>=good|bad|na pairs. Absent on an older/degraded
+# reply, which simply leaves the mapping empty and the UI on its own heuristic.
+_DIRECTION_RE = re.compile(r"^\s*direction:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_DIRECTION_PAIR_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(good|bad|na)", re.IGNORECASE)
 
 # Dialect-specific rules and examples
 _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
@@ -248,13 +253,16 @@ _SHARED_RULES = (
     "subquery, a CTE or an expression. In particular do NOT derive them with ORDER BY "
     "<period> DESC LIMIT n, with MAX/MIN of a period column, with a ranking window "
     "partitioned by the entity (ROW_NUMBER/RANK/DENSE_RANK OVER (PARTITION BY "
-    "<company> ORDER BY <period> DESC) filtered to rn <= n), or from any column whose "
-    "name contains latest, max, last, current or recent (e.g. latest_fy_end_yyyymm, "
-    "max_year): all of those give each company its OWN last years, so a company whose "
+    "<company> ORDER BY <period> DESC) filtered to rn <= n), or from a pre-computed "
+    "per-entity period column (whatever it is named): all of those give each company "
+    "its OWN last years, so a company whose "
     "data ended in 2024 silently answers about different years than one reporting into "
-    "2026, and the question asked for one window. A year in the window with no row is "
-    "simply absent from the result, which is correct — never widen the window, relax "
-    "the filter, or fall back to a per-company latest in order to return n rows\n"
+    "2026, and the question asked for one window. Pick a table that actually "
+    "covers every year in the window: if the one you chose holds only the latest "
+    "year or two, the answer comes back short (2 rows for a 3-year question) and "
+    "looks like missing data — switch to the table with the full history instead. "
+    "Never widen the window, relax the filter, or fall back to a per-company "
+    "latest in order to return n rows\n"
     # Join handling. dim_period holds one row per (fye_month, yyyymm): joining on yyyymm
     # alone matches every year-end month, multiplying rows and stamping the wrong fy on
     # them — measured at 36 rows, all mislabelled, for a 3-row question.
@@ -373,6 +381,11 @@ class NLtoSQLResult:
     # SQL per shot — including corrected SQL, whose table set may differ — without
     # holding on to the retrieval hits. Pass it through ``sql_table_routing``.
     table_sources: dict[str, str] = field(default_factory=dict)
+    # {column: "good" | "bad"} — which way an INCREASE moves the entity, as the
+    # SQL writer judged it. The UI cannot infer this from a column NAME
+    # (interest_cover rising is good, finance_cost rising is bad). Empty when
+    # the writer gave no verdict; the caller then falls back to its own rule.
+    column_direction: dict[str, str] = field(default_factory=dict)
 
 
 class SQLGenerator:
@@ -699,7 +712,7 @@ class SQLGenerator:
         # Step 5: Generate SQL via LLM
         start = time.perf_counter()
         try:
-            sql, confidence = await self._generate_sql(
+            sql, confidence, column_direction = await self._generate_sql(
                 question,
                 ddl_context,
                 evidence,
@@ -734,6 +747,7 @@ class SQLGenerator:
             data_source_id=resolved_source,
             ddl_context=ddl_context,
             table_sources=_hit_table_source_map(hits),
+            column_direction=column_direction,
         )
 
     async def generate_from_context(
@@ -767,7 +781,10 @@ class SQLGenerator:
         Returns:
             Tuple of (sql_string, confidence_score).
         """
-        return await self._generate_sql(
+        # A correction re-runs the SAME question, so its column favourability is
+        # the one the first pass already recorded on the result; dropping it here
+        # keeps this method's established 2-tuple contract with its callers.
+        sql, confidence, _direction = await self._generate_sql(
             question,
             ddl_context,
             evidence,
@@ -776,6 +793,7 @@ class SQLGenerator:
             feedback=feedback,
             governed_metric=governed_metric,
         )
+        return sql, confidence
 
     async def correct(
         self,
@@ -876,7 +894,7 @@ class SQLGenerator:
         feedback: str = "",
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, dict[str, str]]:
         """Call LLM to generate SQL from question and DDL context.
 
         Args:
@@ -944,7 +962,21 @@ class SQLGenerator:
             f"{feedback_block}\n"
             "Return the SQL in a ```sql code block.\n"
             "After the query, rate your confidence (0.0-1.0) that this query "
-            "correctly answers the question. Format: Confidence: X.X"
+            "correctly answers the question. Format: Confidence: X.X\n"
+            # Favourability cannot be read off a column NAME: interest_cover and
+            # tax_refund rising are good, finance_cost rising is bad, and a
+            # "margin" may be either. The writer decided what each output column
+            # measures, so it is the one place that knows — asking here costs a
+            # few output tokens on a call already being made, rather than a
+            # second round trip that would need this same context re-sent.
+            "Finally, for EACH output column, say whether a HIGHER value is good "
+            "news, bad news, or neither. Only a RATIO, MARGIN or GROWTH figure is "
+            "good or bad — a number computed against something else, where higher "
+            "really is better or worse. A plain currency or count amount is 'na' "
+            "however important it is (pat, sales, tax, assets, debt): its size is "
+            "not news on its own. So is an identifier, name or period, and so is "
+            "anything you are unsure of. Use exactly one line:\n"
+            "Direction: <column>=good, <column>=bad, <column>=na"
         )
 
         # Use per-request dialect if provided, otherwise fall back to instance default
@@ -967,8 +999,9 @@ class SQLGenerator:
 
         _warn_if_truncated(result, max_tokens, step="generate")
         _sqlprobe = _extract_sql(result.text)
-        logger.info("sql_probe", question=question[:100], sql=_sqlprobe)
-        return _sqlprobe, _extract_confidence(result.text)
+        direction = _extract_direction(result.text)
+        logger.info("sql_probe", question=question[:100], sql=_sqlprobe, direction=direction)
+        return _sqlprobe, _extract_confidence(result.text), direction
 
 
 def _warn_if_truncated(result: ConverseResult, max_tokens: int, *, step: str) -> None:
@@ -1302,6 +1335,25 @@ def _extract_confidence(text: str) -> float:
     if match:
         return min(float(match.group(1)), 1.0)
     return 0.5
+
+
+def _extract_direction(text: str) -> dict[str, str]:
+    """Per-column favourability from the reply's ``Direction:`` line.
+
+    Returns ``{column: "good" | "bad"}`` — the direction an INCREASE moves the
+    entity. Columns the writer marked ``na`` (identifiers, names, periods) are
+    dropped rather than recorded, so a caller can treat "absent" uniformly as
+    "no opinion" whether the line was missing, malformed, or explicitly na.
+    """
+    match = _DIRECTION_RE.search(text)
+    if not match:
+        return {}
+    out: dict[str, str] = {}
+    for column, verdict in _DIRECTION_PAIR_RE.findall(match.group(1)):
+        value = verdict.lower()
+        if value != "na":
+            out[column.lower()] = value
+    return out
 
 
 def build_fk_adjacency(table_metadata: dict[str, Any]) -> dict[str, set[str]]:

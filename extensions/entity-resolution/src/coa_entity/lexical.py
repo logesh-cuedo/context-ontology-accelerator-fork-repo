@@ -35,6 +35,9 @@ _NOISE = {
 _WORD = re.compile(r"[a-z0-9]+")
 _AMPERSAND_ACRONYM = re.compile(r"\b[a-z](?:\s*&\s*[a-z])+\b")  # "l&t", "m & m"
 _ACRONYM_BONUS = 3.0
+# Below this a match is coincidence — a shared ordinary word, or a stray letter
+# overlap — rather than the user naming the entity.
+_SCORE_FLOOR = 0.3
 
 # Match quality of a question word against a name word.
 _EQUAL, _PREFIX, _STEM, _SPELLING = 1.0, 0.8, 0.7, 0.6
@@ -130,12 +133,25 @@ def match(m: dict, query: str, top_k: dict[str, int]) -> list[tuple[NameEntry, f
     scores: dict[int, float] = defaultdict(float)
     matched: dict[int, set[str]] = defaultdict(set)
 
-    def acronym_score(i: int) -> float:
-        return _ACRONYM_BONUS + max((m["idf"][w] for w in m["entries"][i].words), default=0)
+    def acronym_score(i: int, shared: int = 1) -> float:
+        """Weight of an initials match, divided by how many entities share them.
+
+        An acronym identifies an entity only where it is SPECIFIC to it. "TCS" is
+        the initials of one company, so it names that company; "ME" — from the "me"
+        in "show me the tax report" — is the initials of every two-word company
+        starting M...E, so it names none of them. Flat, the bonus scored both alike
+        and put eight ME companies above every real name in the question, so the
+        company the user did name never reached the model. Dividing by the share
+        count is the same principle as the idf already applied to words: evidence
+        that fits many entities is weak evidence about any one of them. It scales
+        smoothly, so nothing turns on a letter count or a list of words to ignore.
+        """
+        return (_ACRONYM_BONUS + max((m["idf"][w] for w in m["entries"][i].words), default=0)) / shared
 
     for letters in _AMPERSAND_ACRONYM.findall(query.lower()):
-        for i in m["by_initials"].get(re.sub(r"[\s&]", "", letters), ()):
-            scores[i] += acronym_score(i)
+        ids = m["by_initials"].get(re.sub(r"[\s&]", "", letters), ())
+        for i in ids:
+            scores[i] += acronym_score(i, len(ids))
             matched[i].update(m["entries"][i].words)
 
     skip = kind_words(list(top_k))
@@ -163,8 +179,9 @@ def match(m: dict, query: str, top_k: dict[str, int]) -> list[tuple[NameEntry, f
             for i in m["by_word"][w]:
                 best[i] = max(best.get(i, 0.0), weight)
                 matched[i].add(w)
-        for i in m["by_initials"].get(q, ()):
-            best[i] = max(best.get(i, 0.0), acronym_score(i))
+        initials_ids = m["by_initials"].get(q, ())
+        for i in initials_ids:
+            best[i] = max(best.get(i, 0.0), acronym_score(i, len(initials_ids)))
             matched[i].update(m["entries"][i].words)  # an acronym names the whole entity
         for i, weight in best.items():
             scores[i] += weight
@@ -181,6 +198,13 @@ def match(m: dict, query: str, top_k: dict[str, int]) -> list[tuple[NameEntry, f
         if kind not in top_k:
             continue
         items.sort(key=lambda item: (-item[1], len(item[0].name)))
-        floor = max(0.3, 0.5 * items[0][1])
-        result += [item for item in items if item[1] >= floor][: top_k[kind]]
+        # Cut the tail on its own merit, not relative to the best match. A question
+        # can name two entities whose matches differ hugely in strength — an exact
+        # acronym against a misspelled name ("relaience and tcs": 4.95 against 0.41)
+        # — and a floor at half the top score deleted the weaker one before the
+        # model could see it, so a two-company question came back about one. The
+        # absolute floor is what drops coincidental matches; the relative one only
+        # assumed every question names a single entity. ``top_k`` still bounds how
+        # many survive, so the tail cannot grow unchecked.
+        result += [item for item in items if item[1] >= _SCORE_FLOOR][: top_k[kind]]
     return result

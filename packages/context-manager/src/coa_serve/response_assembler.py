@@ -48,6 +48,7 @@ class ResponseAssembler:
         confidence: float,
         retrieved_tables: list[str],
         expanded_tables: list[str],
+        column_direction: dict[str, str] | None = None,
         trace: TraceCollector,
         namespace: str,
         principal: str | None = None,
@@ -68,6 +69,9 @@ class ResponseAssembler:
             trace: Processing-trace collector for this request.
             namespace: Namespace the query ran against.
             principal: Optional authenticated caller identity.
+            column_direction: Per-column favourability from the SQL writer
+                ({column: "good" | "bad"}), recorded in metadata so the UI can
+                colour a figure by what it measures rather than by its sign.
             strategy: Optional Tier-2 strategy label recorded in metadata.
             model_id: Optional per-call model id override.
             ontology_version: Version of the ontology the query ran against,
@@ -86,6 +90,11 @@ class ResponseAssembler:
         metadata["columns"] = columns
         metadata["retrieved_tables"] = retrieved_tables
         metadata["expanded_tables"] = expanded_tables
+        # Only when the writer actually gave a verdict: absent (rather than {})
+        # lets the UI tell "no opinion" from "explicitly neutral" and keep its
+        # own fallback rule for the columns it was told nothing about.
+        if column_direction:
+            metadata["columnDirection"] = column_direction
         if strategy:
             metadata["strategy"] = strategy
         return QueryResult(

@@ -80,6 +80,16 @@ def _build_message_envelope(
     return serialized
 
 
+def _resolved_entities(metadata: dict) -> list[str]:
+    """Entity names the resolver settled on for this turn, from its trace step."""
+    for step in metadata.get("trace") or []:
+        if not isinstance(step, dict) or "entity.resolve" not in str(step.get("step", "")):
+            continue
+        by_kind = (step.get("detail") or {}).get("entities") or {}
+        return [n for names in by_kind.values() if isinstance(names, list) for n in names]
+    return []
+
+
 def _parse_assistant_content(raw_text: str) -> tuple[str, dict | None]:
     """Parse assistant message content, detecting JSON envelope.
 
@@ -272,6 +282,18 @@ class SessionManager:
                     entry: dict = {"role": role, "content": display_text}
                     if include_metadata and metadata:
                         entry["metadata"] = metadata
+                    elif metadata and (resolved := _resolved_entities(metadata)):
+                        # The orchestrator path takes text only, to keep the LLM
+                        # context clean. But a follow-up ("what about roce") names
+                        # nobody and must carry the entity from the turn before,
+                        # which it reads back from the stored words — and a
+                        # misspelled name ("relaience") is not findable in those
+                        # words, so the carry found nobody and the follow-up
+                        # answered about every company in the namespace. The names
+                        # resolution settled on are already in this turn's trace;
+                        # carrying just those keeps the turn readable without
+                        # restoring the whole envelope.
+                        entry["resolved_entities"] = resolved
                     history.append(entry)
                 else:
                     history.append({"role": role, "content": text})

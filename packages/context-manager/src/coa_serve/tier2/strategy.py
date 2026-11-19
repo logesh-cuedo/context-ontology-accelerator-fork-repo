@@ -104,6 +104,9 @@ class StrategyResult:
     ontology_version: str = ""
     retrieved_tables: list[str] = field(default_factory=list)
     expanded_tables: list[str] = field(default_factory=list)
+    # {column: "good" | "bad"} — which way an INCREASE moves the entity, as the
+    # SQL writer judged it. Empty for strategies that report no verdict.
+    column_direction: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
