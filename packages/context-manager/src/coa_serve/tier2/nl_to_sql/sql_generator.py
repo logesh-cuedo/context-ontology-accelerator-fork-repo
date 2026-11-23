@@ -54,11 +54,6 @@ def _defang_user_context(text: str) -> str:
 
 logger = structlog.get_logger(__name__)
 
-# cuedo-ext: topP for every SQL-writing call unless a caller passes one. SQL_TOP_P=""
-# turns it off (not sent); models that reject topP have it dropped by the client.
-_SQL_TOP_P = os.environ.get("SQL_TOP_P", "0").strip()
-DEFAULT_SQL_TOP_P: float | None = float(_SQL_TOP_P) if _SQL_TOP_P else None
-
 DEFAULT_RETRIEVAL_K = 7
 DEFAULT_MAX_TABLES = 10
 
@@ -288,38 +283,6 @@ _SHARED_RULES = (
     '| growth_pct becomes company_name | "Q2 FY26" | "Q3 FY26" | growth_pct. Keep '
     "label columns whose values differ between rows, keep every measure column, and "
     "apply this only when the result has more than one row\n"
-    # cuedo-ext: general business rules (moved from the answer-consistency rules file).
-    "- GROWTH: growth_pct = (current - previous) / previous * 100, ONLY when previous > 0; "
-    "otherwise NULL, and NULL never counts as growth. 'X% growth' means growth_pct >= X; "
-    "'not delivered (greater than) X% growth' means growth_pct is NULL or below X\n"
-    "- WHAT TO COMPARE: a quarter compares with the PREVIOUS quarter unless the question "
-    "says YoY, year on year or same quarter last year; a fiscal year with the previous "
-    "fiscal year; a 9-month or half-year period with the same period a year earlier\n"
-    "- Fetch the previous period by its exact period key with a self-join. Never use "
-    "LAG or LEAD\n"
-    "- GROUP GROWTH (sector, industry, any group): per group, SUM the measure over ALL "
-    "members that have both periods (any sign), then growth_pct of the two sums (NULL "
-    "when the previous sum <= 0). When asked, list those members with the group figure\n"
-    "- ONE BASIS PER ENTITY: when a table holds several bases of the same figure (for "
-    "example Standalone and Consolidated), use Standalone for an entity only if it has "
-    "Standalone rows for EVERY period the question uses, otherwise the other basis. "
-    "Never add or mix two bases\n"
-    "- A 9-month or half-year figure is the sum of its quarters, only when all of those "
-    "quarters exist\n"
-    "- MEDIANS: compute the exact median with ROW_NUMBER, never approx_percentile: "
-    "(SELECT AVG(x) FROM (SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS rn, COUNT(*) OVER "
-    "() AS n FROM <rows>) WHERE rn IN ((n + 1) / 2, (n + 2) / 2)). Medians and averages "
-    "of ratios (P/E, EV/EBITDA, other multiples) use only values > 0\n"
-    "- EXACT ARITHMETIC: cast every measure to DECIMAL(38,6) before SUM, AVG or division, "
-    "then ROUND every decimal output to 2 places\n"
-    "- SHOW THE VALUES USED: the previous and current values, the growth or change, and "
-    "any measure the question filters on\n"
-    "- FIXED ORDER: ORDER BY the main value DESC NULLS LAST, then the entity name (or "
-    "group or date), so rows never swap places between runs\n"
-    "- DAILY SNAPSHOT TABLES (one row per entity per date, possibly duplicated): first "
-    "reduce to one row per entity for ONE date used for all entities (MAX of each "
-    "column, GROUP BY entity). For an explicit date with no rows, use the latest date "
-    "before it\n"
     # Join handling. dim_period holds one row per (fye_month, yyyymm): joining on yyyymm
     # alone matches every year-end month, multiplying rows and stamping the wrong fy on
     # them — measured at 36 rows, all mislabelled, for a 3-row question.
@@ -925,7 +888,7 @@ class SQLGenerator:
             system=self._system_prompt,
             max_tokens=max_tokens,
             temperature=0,
-            top_p=DEFAULT_SQL_TOP_P if top_p is None else top_p,  # cuedo-ext
+            top_p=top_p,  # cuedo-ext
             model_id=model_id,
         )
         _warn_if_truncated(result, max_tokens, step="correct")
@@ -1053,7 +1016,7 @@ class SQLGenerator:
             system=system_prompt,
             max_tokens=max_tokens,
             temperature=0,
-            top_p=DEFAULT_SQL_TOP_P if top_p is None else top_p,  # cuedo-ext
+            top_p=top_p,  # cuedo-ext
             model_id=model_id,
             guardrail_id=self._effective_guardrail_id(),
             # Sent unconditionally: this is the ONLY channel for the user's
