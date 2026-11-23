@@ -190,7 +190,8 @@ class AgenticStrategy:
             execution=SqlExecutionService(self._firewall, self._query_executor),
             graph=graph,
             region=getattr(self._sql_generator.llm, "_region", None) or _DEFAULT_REGION,
-            model_id=context.model_id,
+            # cuedo-ext: serve's BEDROCK_MODEL_ID, not Strands' own default model.
+            model_id=context.model_id or getattr(self._sql_generator.llm, "model_id", None),
             prefetch_schemas=self._prefetch_schemas,
         )
 
