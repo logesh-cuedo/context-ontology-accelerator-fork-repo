@@ -263,6 +263,26 @@ _SHARED_RULES = (
     "looks like missing data — switch to the table with the full history instead. "
     "Never widen the window, relax the filter, or fall back to a per-company "
     "latest in order to return n rows\n"
+    # cuedo-ext: relative periods and dates come from today's date, never from the data.
+    "- Relative periods and dates count from today's date above, NEVER from the latest "
+    "data in a table: 'recently concluded', 'latest', 'last' or 'previous' quarter = the "
+    "quarter (Jan-Mar, Apr-Jun, Jul-Sep, Oct-Dec) that ENDED most recently before today; "
+    "'latest' or 'last' fiscal year = the fiscal year that ended most recently before "
+    "today; 'today', 'current', 'latest' or 'as on now' for a date = today's date; "
+    "'yesterday' = today minus 1 day. Write the resolved period or date into the SQL as "
+    "a literal. Do not use MAX of a date or period column to find it. If the data has "
+    "no rows for that period or date, return the empty result; never fall back to the "
+    "latest available period or date\n"
+    # cuedo-ext: a label that is the same on every row becomes its value column's name.
+    "- CONSTANT LABEL COLUMNS, for every question: a label column (a period, date, "
+    "sector, category, basis or any other non-measure column) whose value is fixed by "
+    "the question or by your filters has the SAME value on every row. Do NOT output it. "
+    "Put that value into the name of the value column(s) it describes instead, as a "
+    "quoted alias you write yourself from the literal you used. Example: "
+    "company_name | previous_period | previous_value | current_period | current_value "
+    '| growth_pct becomes company_name | "Q2 FY26" | "Q3 FY26" | growth_pct. Keep '
+    "label columns whose values differ between rows, keep every measure column, and "
+    "apply this only when the result has more than one row\n"
     # Join handling. dim_period holds one row per (fye_month, yyyymm): joining on yyyymm
     # alone matches every year-end month, multiplying rows and stamping the wrong fy on
     # them — measured at 36 rows, all mislabelled, for a 3-row question.
