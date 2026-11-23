@@ -73,6 +73,7 @@ CACHE_FIELDS = (
     "table_sources",
     "ddl_context",
     "column_direction",
+    "empty_message",
 )
 
 

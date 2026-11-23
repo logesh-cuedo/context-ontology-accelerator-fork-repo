@@ -16,6 +16,9 @@ from .trace import TraceCollector
 # follow-up that intersects the Tier-2 accuracy eval; see MR "Notes for reviewers".
 _TIER2_EMPTY_RESULT_PENALTY = 0.5
 
+# cuedo-ext: said when a Tier-2 query returns no rows and the SQL writer gave no sentence.
+NO_ROWS_MESSAGE = "No matching data was found for this question."
+
 
 class ResponseAssembler:
     """Builds QueryResult from tier-specific resolution outputs."""
@@ -56,6 +59,7 @@ class ResponseAssembler:
         model_id: str | None = None,
         ontology_version: str | None = None,
         include_debug_info: bool = False,
+        empty_message: str = "",  # cuedo-ext: sentence shown when there are no rows
     ) -> QueryResult:
         """Build a Tier-2 QueryResult from an NL-to-SQL resolution.
 
@@ -82,6 +86,8 @@ class ResponseAssembler:
                 via ``options.includeDebugInfo=true``. Withheld by default so
                 the field cannot leak internal schema (table names, column
                 names, joins) to a caller who did not opt in.
+            empty_message: cuedo-ext — the SQL writer's sentence for an empty
+                result; returned as ``synthesized_answer`` when there are no rows.
 
         Returns:
             A QueryResult tagged as Tier 2.
@@ -101,6 +107,8 @@ class ResponseAssembler:
             tier=2,
             confidence=ConfidenceScore(score=confidence, rationale="LLM-generated SQL from ontology retrieval"),
             result_rows=rows,
+            # cuedo-ext: an empty result is answered with a sentence instead of a bare empty table.
+            synthesized_answer=None if rows else (empty_message or NO_ROWS_MESSAGE),
             query_used=sql_used if include_debug_info else None,
             trace=trace.steps,
             ontology_version=ontology_version,

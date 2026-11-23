@@ -167,6 +167,8 @@ _CONFIDENCE_RE = re.compile(r"confidence:\s*([01](?:\.\d+)?)", re.IGNORECASE)
 # reply, which simply leaves the mapping empty and the UI on its own heuristic.
 _DIRECTION_RE = re.compile(r"^\s*direction:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _DIRECTION_PAIR_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(good|bad|na)", re.IGNORECASE)
+# cuedo-ext: the writer's "Empty result:" sentence, shown when the query returns no rows.
+_EMPTY_RESULT_RE = re.compile(r"^\s*\**empty result\**:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 # Dialect-specific rules and examples
 _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
@@ -304,7 +306,14 @@ _SHARED_RULES = (
     "repeat across joined rows\n"
     "- Return the SQL in a ```sql code block\n"
     "- After the query, rate your confidence (0.0-1.0) that this query "
-    "correctly answers the question"
+    "correctly answers the question\n"
+    # cuedo-ext: the sentence shown to the user when the query returns no rows.
+    "- Then add ONE line 'Empty result: <sentence>' — what to tell the user if this "
+    "query returns no rows. Say plainly that nothing matched, naming the period, "
+    "threshold or filter from the question, and the most likely reason (for example "
+    "'No results: Q2 FY27 (Jul-Sep 2026) results are not in the data yet.' or 'No "
+    "company met the 20% PAT growth test for Q3 FY26.'). One short sentence, no SQL "
+    "or column names"
 )
 
 _EXAMPLE_SCHEMA = (
@@ -406,6 +415,8 @@ class NLtoSQLResult:
     # (interest_cover rising is good, finance_cost rising is bad). Empty when
     # the writer gave no verdict; the caller then falls back to its own rule.
     column_direction: dict[str, str] = field(default_factory=dict)
+    # cuedo-ext: sentence for the user when the query returns no rows ("" = none).
+    empty_message: str = ""
 
 
 class SQLGenerator:
@@ -735,7 +746,7 @@ class SQLGenerator:
         # Step 5: Generate SQL via LLM
         start = time.perf_counter()
         try:
-            sql, confidence, column_direction = await self._generate_sql(
+            sql, confidence, column_direction, empty_message = await self._generate_sql(
                 question,
                 ddl_context,
                 evidence,
@@ -772,6 +783,7 @@ class SQLGenerator:
             ddl_context=ddl_context,
             table_sources=_hit_table_source_map(hits),
             column_direction=column_direction,
+            empty_message=empty_message,  # cuedo-ext
         )
 
     async def generate_from_context(
@@ -808,7 +820,7 @@ class SQLGenerator:
         # A correction re-runs the SAME question, so its column favourability is
         # the one the first pass already recorded on the result; dropping it here
         # keeps this method's established 2-tuple contract with its callers.
-        sql, confidence, _direction = await self._generate_sql(
+        sql, confidence, _direction, _empty = await self._generate_sql(
             question,
             ddl_context,
             evidence,
@@ -921,7 +933,7 @@ class SQLGenerator:
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
         top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
-    ) -> tuple[str, float, dict[str, str]]:
+    ) -> tuple[str, float, dict[str, str], str]:  # cuedo-ext: + empty-result sentence
         """Call LLM to generate SQL from question and DDL context.
 
         Args:
@@ -1030,7 +1042,7 @@ class SQLGenerator:
         _sqlprobe = _extract_sql(result.text)
         direction = _extract_direction(result.text)
         logger.info("sql_probe", question=question[:100], sql=_sqlprobe, direction=direction)
-        return _sqlprobe, _extract_confidence(result.text), direction
+        return _sqlprobe, _extract_confidence(result.text), direction, _extract_empty_message(result.text)
 
 
 def _warn_if_truncated(result: ConverseResult, max_tokens: int, *, step: str) -> None:
@@ -1364,6 +1376,12 @@ def _extract_confidence(text: str) -> float:
     if match:
         return min(float(match.group(1)), 1.0)
     return 0.5
+
+
+def _extract_empty_message(text: str) -> str:
+    """cuedo-ext: the reply's 'Empty result:' sentence, or "" when absent."""
+    match = _EMPTY_RESULT_RE.search(text)
+    return match.group(1).strip().strip("*`").strip()[:300] if match else ""
 
 
 def _extract_direction(text: str) -> dict[str, str]:

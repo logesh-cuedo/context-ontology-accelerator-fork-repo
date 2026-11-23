@@ -837,6 +837,7 @@ class Orchestrator:
                     strategy=result.strategy_name,
                     model_id=model_id,
                     include_debug_info=include_debug_info,
+                    empty_message=result.empty_message,  # cuedo-ext
                 )
             )
 

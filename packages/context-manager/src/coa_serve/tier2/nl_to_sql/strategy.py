@@ -505,6 +505,7 @@ class NLtoSQLStrategy:
                     expanded_tables=nl_to_sql_result.expanded_tables,
                     data_source_id=nl_to_sql_result.data_source_id or "",
                     column_direction=nl_to_sql_result.column_direction,
+                    empty_message=nl_to_sql_result.empty_message,  # cuedo-ext
                 )
                 tables = tables_visible_to(
                     nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables, profile
@@ -779,6 +780,7 @@ def _ext_cached_result(cached: dict) -> NLtoSQLResult:
         ddl_context=cached.get("ddl_context") or "",
         table_sources=dict(cached.get("table_sources") or {}),
         column_direction=dict(cached.get("column_direction") or {}),
+        empty_message=str(cached.get("empty_message") or ""),
     )
 
 
@@ -793,4 +795,5 @@ def _ext_cache_entry(sql: str, confidence: float, result: NLtoSQLResult) -> dict
         "table_sources": result.table_sources,
         "ddl_context": result.ddl_context,
         "column_direction": result.column_direction,
+        "empty_message": result.empty_message,
     }

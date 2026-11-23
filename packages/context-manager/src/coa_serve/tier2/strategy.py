@@ -107,6 +107,8 @@ class StrategyResult:
     # {column: "good" | "bad"} — which way an INCREASE moves the entity, as the
     # SQL writer judged it. Empty for strategies that report no verdict.
     column_direction: dict[str, str] = field(default_factory=dict)
+    # cuedo-ext: sentence for the user when the query returned no rows ("" = none).
+    empty_message: str = ""
 
 
 @dataclass
