@@ -524,6 +524,8 @@ class NLtoSQLStrategy:
                     fw_result.authorized_sql, query
                 )
                 final_empty = exec_result.row_count == 0 and (user_value_filter or shot >= self._max_shots)
+                if cached:  # cuedo-ext: a stored SQL's empty result is its answer; never re-generate it
+                    final_empty = exec_result.row_count == 0
                 trace.record(
                     StepId.T2_SQL_EXECUTE,
                     "success",

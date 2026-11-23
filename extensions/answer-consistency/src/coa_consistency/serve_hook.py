@@ -21,13 +21,26 @@ Config, one SSM parameter per namespace: ``{SSM_PREFIX}/consistency/{namespace}`
      "cacheUri": "s3://bucket/answer-consistency/<ns>/cache/",
      "topP": 0,
      "cacheVersion": "1",
+     "protectedTermsUri": "s3://bucket/answer-consistency/<ns>/protected_terms.json",  # optional
+     "answersUri": "s3://bucket/answer-consistency/<ns>/verified_answers.json",       # optional
      "strategy": "nl_to_sql"}           # optional: pin the Tier-2 strategy (no fallback)
 
 No parameter -> the feature is off and serve runs exactly as before. Any error
 (SSM, S3, bad JSON) also turns it off for that request; it never fails a query.
 
 A cached SQL is used only while the rules, the namespace's metric summaries and
-``cacheVersion`` are unchanged. Change ``cacheVersion`` to clear the cache by hand
+``cacheVersion`` are unchanged.
+
+Verified answers: ``answersUri`` is a JSON list of {"question", "sql", ...cache
+fields}. A question that matches one (typo rule below) always runs that SQL,
+whatever the rules or metrics are; it is checked before the AI cache.
+
+Typos: a question is the same question when its protected words are identical
+and in the same order, and its other words differ only by small typos.
+Protected words are numbers, '%', words of 3 letters or less, the logic words
+below, and the namespace's terms file (metric, sector and period words). So
+"compnies" finds "companies", but 20% vs 80%, Q3FY26 vs Q2FY26, PAT vs PBT,
+above vs below are different questions. Change ``cacheVersion`` to clear the cache by hand
 (e.g. after an ontology change). Delete one cache object to forget one answer.
 """
 
@@ -63,6 +76,87 @@ CACHE_FIELDS = (
 )
 
 
+def _words(text: str) -> list[str]:
+    """'a b c' -> ['a', 'b', 'c']."""
+    return text.split()
+
+
+# Dropped before comparing: they never change what a question asks.
+_STOPWORDS = frozenset(
+    _words(
+        "a an the of in on at for to is are was were be been it its which that who whom what whats please "
+        "give me show tell can could you we us my our has have had do does did will would should this these "
+        "those with by from as during also along there their them they kindly i"
+    )
+)
+# Always compared exactly: changing one changes the answer.
+LOGIC_WORDS = frozenset(
+    _words(
+        "above below greater less more fewer than between atleast atmost least most not no never but except "
+        "without only all any each every both either neither and or over under exceed exceeds exceeding "
+        "highest lowest top bottom max min maximum minimum median average mean total sum count rank growth "
+        "grown grew grow growing decline declined declining increase increased decrease decreased compression "
+        "expansion improve improved fall fell rise rose yoy qoq previous last latest recent recently "
+        "concluded current first second third fourth next prior before after since until ago yesterday today "
+        "trailing quarter quarters quarterly year years yearly annual annually month months week weeks "
+        "standalone consolidated percent percentage crore crores lakh lakhs bps basis points ratio versus "
+        "compare same different one two three four five six seven eight nine ten eleven twelve twenty thirty "
+        "forty fifty hundred thousand million billion january february march april may june july august "
+        "september october november december sept time times listed unlisted end start begin beginning ending "
+        "ended"
+    )
+)
+
+
+def question_parts(text: str, protected_terms: frozenset[str] = frozenset()) -> tuple[list[str], list[str]]:
+    """Split a question into (protected words, other words), both in order, stopwords removed."""
+    text = text.lower().replace("&", " and ")
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)  # 1,500 -> 1500
+    text = re.sub(r"\bat\s+least\b", "atleast", text)
+    text = re.sub(r"\bat\s+most\b", "atmost", text)
+    protected: list[str] = []
+    loose: list[str] = []
+    for word in re.findall(r"[a-z]+|\d+(?:\.\d+)?|%", text):
+        if word in _STOPWORDS or _is_stopword_typo(word, protected_terms):
+            continue
+        if not word.isalpha() or len(word) <= 3 or word in LOGIC_WORDS or word in protected_terms:
+            protected.append(word)
+        else:
+            loose.append(word)
+    return protected, loose
+
+
+def _is_stopword_typo(word: str, protected_terms: frozenset[str]) -> bool:
+    """A 3-letter word one letter off a longer stopword: 'gve' (give), 'hve' (have), 'whch' is not short."""
+    if len(word) != 3 or not word.isalpha() or word in LOGIC_WORDS or word in protected_terms:
+        return False
+    return any(len(stop) >= 4 and _edit_distance(word, stop) == 1 for stop in _STOPWORDS)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Letters to add, remove, change or swap (adjacent) to turn a into b."""
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def same_words(a: list[str], b: list[str]) -> bool:
+    """Same words allowing typos: 1 letter for words of 4-7 letters, 2 for longer words."""
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        if x != y and _edit_distance(x, y) > (1 if min(len(x), len(y)) < 8 else 2):
+            return False
+    return True
+
+
 def normalize_question(text: str) -> str:
     """Lower case, single spaces, no punctuation at the ends: 'Hello  World?' -> 'hello world'."""
     return re.sub(r"\s+", " ", text).strip().strip(".?!").strip().lower()
@@ -87,6 +181,7 @@ class Tier2Consistency:
     cache_key: str = ""
     question: str = ""
     version: str = ""
+    loose: list[str] = field(default_factory=list)
     _s3: Any = field(default=None, repr=False)
 
     def save(self, result: dict) -> None:
@@ -94,7 +189,9 @@ class Tier2Consistency:
         if self.cached is not None or not self.cache_key or self._s3 is None:
             return
         entry = {k: result.get(k) for k in CACHE_FIELDS}
-        entry.update(question=self.question, version=self.version, savedAt=datetime.now(UTC).isoformat())
+        entry.update(
+            question=self.question, version=self.version, loose=self.loose, savedAt=datetime.now(UTC).isoformat()
+        )
         try:
             self._s3.put_object(
                 Bucket=self.cache_bucket,
@@ -157,18 +254,29 @@ class ConsistencyHook:
             cache_uri = config.get("cacheUri", "")
             if cache_uri:
                 question = normalize_question(query)
+                # Serve lists metrics in load order, which differs between containers: sort them.
+                metrics = sorted(metric_definitions or [], key=lambda m: json.dumps(m, sort_keys=True, default=str))
                 version = hashlib.sha256(
                     json.dumps(
-                        [rules, metric_definitions or [], str(config.get("cacheVersion", ""))],
+                        [rules, metrics, str(config.get("cacheVersion", ""))],
                         sort_keys=True,
                         default=str,
                     ).encode()
                 ).hexdigest()[:16]
+                terms = frozenset(json.loads(self.rules_for(config.get("protectedTermsUri", "")) or "[]"))
+                protected, loose = question_parts(query, terms)
                 bucket, prefix = split_s3_uri(cache_uri)
+                # Questions with the same protected words share a folder; typos are matched inside it.
+                folder = hashlib.sha256(json.dumps([protected, version]).encode()).hexdigest()[:24]
                 name = hashlib.sha256(f"{question}\n{version}".encode()).hexdigest()[:32]
-                ext.cache_bucket, ext.cache_key = bucket, f"{prefix.rstrip('/')}/{name}.json"
-                ext.question, ext.version = question, version
-                ext.cached = self._read_cache(bucket, ext.cache_key)
+                folder_prefix = f"{prefix.rstrip('/')}/{folder}/"
+                ext.cache_bucket, ext.cache_key = bucket, f"{folder_prefix}{name}.json"
+                ext.question, ext.version, ext.loose = question, version, loose
+                ext.cached = (
+                    self._verified_answer(config.get("answersUri", ""), protected, loose, terms)
+                    or self._read_cache(bucket, ext.cache_key)
+                    or self._typo_match(bucket, folder_prefix, loose)
+                )
             return ext
         except Exception as exc:
             logger.warning("consistency_prepare_failed", namespace=namespace, error=str(exc)[:200])
@@ -204,6 +312,32 @@ class ConsistencyHook:
         text = self._s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode().strip()
         self._rules[uri] = (text, time.monotonic())
         return text
+
+    def _verified_answer(self, uri: str, protected: list[str], loose: list[str], terms: frozenset[str]) -> dict | None:
+        """The verified SQL for this question (same protected words, typos allowed), or None."""
+        if not uri:
+            return None
+        for answer in json.loads(self.rules_for(uri) or "[]"):
+            other_protected, other_loose = question_parts(answer.get("question", ""), terms)
+            if answer.get("sql") and other_protected == protected and same_words(loose, other_loose):
+                logger.info("consistency_verified_answer", question=answer["question"][:80])
+                return {**answer, "verified": True}
+        return None
+
+    def _typo_match(self, bucket: str, folder_prefix: str, loose: list[str]) -> dict | None:
+        """A stored SQL in the same folder whose other words differ only by typos (oldest first), or None."""
+        try:
+            listed = self._s3.list_objects_v2(Bucket=bucket, Prefix=folder_prefix, MaxKeys=100)
+        except Exception as exc:
+            logger.warning("consistency_cache_list_failed", prefix=folder_prefix, error=str(exc)[:200])
+            return None
+        objects = sorted(listed.get("Contents", []), key=lambda o: (str(o.get("LastModified", "")), o["Key"]))
+        for obj in objects:
+            entry = self._read_cache(bucket, obj["Key"])
+            if entry is not None and same_words(loose, list(entry.get("loose") or [])):
+                logger.info("consistency_cache_typo_hit", key=obj["Key"])
+                return entry
+        return None
 
     def _read_cache(self, bucket: str, key: str) -> dict | None:
         """A stored SQL for this question and version, or None."""

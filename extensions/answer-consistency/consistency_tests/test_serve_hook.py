@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 
-from coa_consistency.serve_hook import ConsistencyHook, Tier2Consistency, normalize_question
+from coa_consistency.serve_hook import ConsistencyHook, Tier2Consistency, normalize_question, question_parts, same_words
 
 
 class _NotFound(Exception):
@@ -39,6 +39,10 @@ class FakeS3:
 
     def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
         self.objects[(Bucket, Key)] = Body
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys):  # noqa: N803
+        keys = sorted(k for b, k in self.objects if b == Bucket and k.startswith(Prefix))
+        return {"Contents": [{"Key": k, "LastModified": ""} for k in keys[:MaxKeys]]}
 
 
 class Trace:
@@ -148,3 +152,68 @@ def test_strategy_pin():
     assert asyncio.run(hook.strategy_for("other", Opt.A)) is Opt.A
     bad, _, _ = _hook(config={**CONFIG, "strategy": "nope"})
     assert asyncio.run(bad.strategy_for("ns1", Opt.A)) is Opt.A
+
+
+S1 = "Please give me the companies which have grown its PAT by 20% during Q3FY26?"
+
+
+def test_question_parts_protects_numbers_periods_logic_and_terms():
+    protected, loose = question_parts(S1, frozenset({"ancillary"}))
+    assert protected == ["grown", "pat", "20", "%", "q", "3", "fy", "26"]
+    assert loose == ["companies"]
+    assert question_parts("market cap of 1,500 crores")[0] == question_parts("market cap of 1500 crores")[0]
+    assert question_parts("at least 3 years")[0] == question_parts("atleast 3 years")[0]
+    assert question_parts("gve me pat", frozenset({"pat"}))[0] == ["pat"]
+    assert "ancillary" in question_parts("Auto ancillary sector", frozenset({"ancillary"}))[0]
+
+
+def test_same_words_allows_small_typos_only():
+    assert same_words(["companies"], ["compnies"])
+    assert same_words(["concentration"], ["concentraiton"])
+    assert not same_words(["companies"], ["sectors"])
+    assert not same_words(["sales"], ["rates"])
+    assert not same_words(["companies"], ["companies", "listed"])
+
+
+def test_typo_hits_cache_but_changed_logic_misses():
+    hook, _, _ = _hook()
+    hook.prepare(S1, "ns1", None).save({"sql": "SELECT 1"})
+    assert hook.prepare(S1, "ns1", None).cached["sql"] == "SELECT 1"
+    typo = "Please gve me the compnies which have grown its PAT by 20% during Q3FY26?"
+    assert hook.prepare(typo, "ns1", None).cached["sql"] == "SELECT 1"
+    for changed in (
+        S1.replace("20%", "80%"),
+        S1.replace("Q3FY26", "Q2FY26"),
+        S1.replace("PAT", "PBT"),
+        S1.replace("grown", "declined"),
+        S1.replace("companies", "sectors"),
+    ):
+        assert hook.prepare(changed, "ns1", None).cached is None, changed
+
+
+def test_protected_terms_file_makes_a_word_exact():
+    config = {**CONFIG, "protectedTermsUri": "s3://b/terms.json"}
+    hook, _, s3 = _hook(config=config)
+    s3.objects[("b", "terms.json")] = json.dumps(["cement", "ancillary"]).encode()
+    hook.prepare("EBITDA growth of cement sector in Q1FY26", "ns1", None).save({"sql": "SELECT 1"})
+    assert hook.prepare("EBITDA growth of cemnt sector in Q1FY26", "ns1", None).cached is None
+    assert hook.prepare("EBITDA growth of cement sectr in Q1FY26", "ns1", None).cached["sql"] == "SELECT 1"
+
+
+def test_metric_order_does_not_change_the_cache():
+    hook, _, _ = _hook()
+    a, b = {"name": "a"}, {"name": "b"}
+    hook.prepare("q", "ns1", [a, b]).save({"sql": "SELECT 1"})
+    assert hook.prepare("q", "ns1", [b, a]).cached["sql"] == "SELECT 1"
+
+
+def test_verified_answer_wins_and_changed_logic_misses():
+    config = {**CONFIG, "answersUri": "s3://b/answers.json"}
+    hook, _, s3 = _hook(config=config)
+    s3.objects[("b", "answers.json")] = json.dumps([{"question": S1, "sql": "SELECT 482", "confidence": 0.95}]).encode()
+    assert hook.prepare(S1, "ns1", [{"name": "x"}]).cached["sql"] == "SELECT 482"
+    assert hook.prepare(S1.replace("companies", "compnies"), "ns1", None).cached["sql"] == "SELECT 482"
+    assert hook.prepare(S1.replace("20%", "80%"), "ns1", None).cached is None
+    ext = hook.prepare(S1, "ns1", None)
+    ext.save({"sql": "SELECT 0"})  # a verified hit is never overwritten
+    assert hook.prepare(S1, "ns1", None).cached["sql"] == "SELECT 482"
