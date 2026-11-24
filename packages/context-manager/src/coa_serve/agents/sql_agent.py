@@ -50,6 +50,7 @@ import structlog
 from ..config import env_with_legacy_name
 from ..exceptions import AccessDeniedError
 from ..sql_execution import SqlExecutionService, SqlExecutionStatus
+from ..tier2.nl_to_sql.sql_generator import _DATASET_CHECKLIST  # cuedo-ext
 from ..tier2.tools import (
     DEFAULT_NODE_LIMIT,
     OntologyGraphTool,
@@ -111,7 +112,8 @@ def _intent_review_enabled() -> bool:
     return env_with_legacy_name("SERVE_DEEP_REASONING_INTENT_REVIEW").strip().lower() in ("1", "true", "on", "yes")
 
 
-AGENT_SYSTEM_PROMPT = """\
+AGENT_SYSTEM_PROMPT = (
+    """\
 You are a SQL expert answering a question against a relational database you must \
 discover through tools. Workflow:
 1. The prompt may already list candidate tables and inline the schema of the most \
@@ -124,9 +126,8 @@ values'). Do NOT guess columns.
 produces the query from those tables' schema. Do NOT write SQL yourself.
 4. Call execute_sql with the handle generate_sql returned to run that query.
 5. If execute_sql returns an error, call generate_sql again (optionally inspect more \
-schema first) and execute the new handle. If it returns zero rows and the question \
-expects data, reconsider which tables/filters are right and try again.
-6. When execute_sql succeeds with the intended result, output the FINAL SQL in <sql>...</sql> tags.
+schema first) and execute the new handle.
+6. When execute_sql succeeds, output the FINAL SQL in <sql>...</sql> tags.
 
 Rules:
 - ALWAYS get SQL from generate_sql — never hand-write SQL in your reasoning.
@@ -135,7 +136,22 @@ Rules:
 - PRECISION: most questions need 1-3 tables. Don't over-retrieve; pick the minimal set.
 - The candidate tables may span several unrelated databases; only join tables that \
 share a real foreign key. Ignore irrelevant candidates.
-- Output the final verified SQL in <sql>...</sql>."""
+- Output the final verified SQL in <sql>...</sql>.
+
+Company-financials dataset (combined_profit_and_loss_* tables) - cuedo-ext:
+- generate_sql already applies the dataset rules below. The first query that executes \
+without an error IS the answer: output it. Call generate_sql again ONLY after an \
+execution error - never to change the periods, the measure, the comparison (previous \
+quarter vs same quarter last year) or the layout.
+- A 'No results: ...' row, zero rows, or a figure with company_count 0 is a CORRECT final \
+answer: the data has no match. Output that SQL; do not retry other periods or tables.
+- For table choice: PAT / EBITDA -> combined_profit_and_loss_derived_quarterly or _yearly; \
+net sales / revenue -> combined_profit_and_loss_income_quarterly or _yearly; gross margin \
+-> finance_metrics_financial_highlights_yearly; market cap, P/E, EV/EBITDA -> \
+historical_market_cap_pe_ev_ebitda.
+"""
+    + _DATASET_CHECKLIST
+)
 
 
 # Appended to the system prompt ONLY when SERVE_DEEP_REASONING_INTENT_REVIEW is on. Targets

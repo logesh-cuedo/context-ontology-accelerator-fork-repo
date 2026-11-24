@@ -934,6 +934,7 @@ class SQLGenerator:
         self._fk_adjacency = fk_adjacency or {}
         self._retrieval_k = retrieval_k
         self._max_tables = max_tables
+        self._dialect = dialect  # cuedo-ext: the prompt is built per call (today's date)
         self._system_prompt = _build_system_prompt(dialect)
         self._guardrail_id = guardrail_id
         self._guardrail_id_provider = guardrail_id_provider
@@ -1362,7 +1363,7 @@ class SQLGenerator:
         max_tokens = _resolve_max_output_tokens()
         result: ConverseResult = await self._llm.converse(
             prompt,
-            system=self._system_prompt,
+            system=_build_system_prompt(self._dialect),  # cuedo-ext: today's date per call
             max_tokens=max_tokens,
             temperature=0,
             model_id=model_id,
@@ -1481,8 +1482,9 @@ class SQLGenerator:
             "Direction: <column>=good, <column>=bad, <column>=na"
         )
 
-        # Use per-request dialect if provided, otherwise fall back to instance default
-        system_prompt = _build_system_prompt(dialect) if dialect else self._system_prompt
+        # Use per-request dialect if provided, otherwise fall back to instance default.
+        # cuedo-ext: rebuilt every call so today's date and the fiscal calendar never go stale.
+        system_prompt = _build_system_prompt(dialect or self._dialect)
 
         max_tokens = _resolve_max_output_tokens()
         result: ConverseResult = await self._llm.converse(
