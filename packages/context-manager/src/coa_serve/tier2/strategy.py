@@ -20,7 +20,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
@@ -107,8 +107,6 @@ class StrategyResult:
     # {column: "good" | "bad"} — which way an INCREASE moves the entity, as the
     # SQL writer judged it. Empty for strategies that report no verdict.
     column_direction: dict[str, str] = field(default_factory=dict)
-    # cuedo-ext: sentence for the user when the query returned no rows ("" = none).
-    empty_message: str = ""
 
 
 @dataclass
@@ -279,7 +277,7 @@ class StructuredQueryTier:
         # Normalize here as well as in the orchestrator: a direct caller (test,
         # benchmark harness) reaching resolve(option=...) with the pre-rename
         # spelling must still get the agent, not the fallback chain.
-        option = cast(str, normalize_strategy_option(option))
+        option = normalize_strategy_option(option)
         if option == StrategyOption.DEEP_REASONING:
             # Opt-in only: the agent runs solely when explicitly pinned, never as a
             # fallback in any of the sequential/parallel paths below.

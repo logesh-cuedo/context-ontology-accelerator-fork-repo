@@ -23,7 +23,7 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Protocol, runtime_checkable
 
 import structlog
@@ -167,8 +167,6 @@ _CONFIDENCE_RE = re.compile(r"confidence:\s*([01](?:\.\d+)?)", re.IGNORECASE)
 # reply, which simply leaves the mapping empty and the UI on its own heuristic.
 _DIRECTION_RE = re.compile(r"^\s*direction:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _DIRECTION_PAIR_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(good|bad|na)", re.IGNORECASE)
-# cuedo-ext: the writer's "Empty result:" sentence, shown when the query returns no rows.
-_EMPTY_RESULT_RE = re.compile(r"^\s*\**empty result\**:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 # Dialect-specific rules and examples
 _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
@@ -265,8 +263,8 @@ _SHARED_RULES = (
     "looks like missing data — switch to the table with the full history instead. "
     "Never widen the window, relax the filter, or fall back to a per-company "
     "latest in order to return n rows\n"
-    # cuedo-ext: relative periods and dates come from today's date, never from the data.
-    "- Relative periods and dates count from today's date above, NEVER from the latest "
+    # cuedo-ext: answer rules — relative dates, layout, growth, medians, comparisons.
+    "- RELATIVE PERIODS AND DATES count from today's date above, NEVER from the latest "
     "data in a table: 'recently concluded', 'latest', 'last' or 'previous' quarter = the "
     "quarter (Jan-Mar, Apr-Jun, Jul-Sep, Oct-Dec) that ENDED most recently before today; "
     "'latest' or 'last' fiscal year = the fiscal year that ended most recently before "
@@ -278,21 +276,63 @@ _SHARED_RULES = (
     "'last month-end' = the last day of the previous month; 'end of last quarter' = the "
     "last day of the previous calendar quarter; 'end of last year' = 31 December of last "
     "year; 'same day last year' = today minus 1 year; 'N months ago' = today minus N "
-    "months. An explicit calendar date (15 January 2020) is used as written. Write the "
-    "resolved period or date into the SQL as "
-    "a literal. Do not use MAX of a date or period column to find it. If the data has "
-    "no rows for that period or date, return the empty result; never fall back to the "
-    "latest available period or date\n"
-    # cuedo-ext: a label that is the same on every row becomes its value column's name.
-    "- CONSTANT LABEL COLUMNS, for every question: a label column (a period, date, "
-    "sector, category, basis or any other non-measure column) whose value is fixed by "
-    "the question or by your filters has the SAME value on every row. Do NOT output it. "
-    "Put that value into the name of the value column(s) it describes instead, as a "
-    "quoted alias you write yourself from the literal you used. Example: "
-    "company_name | previous_period | previous_value | current_period | current_value "
-    '| growth_pct becomes company_name | "Q2 FY26" | "Q3 FY26" | growth_pct. Keep '
-    "label columns whose values differ between rows, keep every measure column, and "
-    "apply this only when the result has more than one row\n"
+    "months. Write the resolved period or date into the SQL as a literal; never use MAX "
+    "of a date or period column to find it, and never fall back to an earlier period or "
+    "date. An explicit calendar date (15 January 2020) is used as written; if a daily "
+    "table has no row for it, use the latest date before it. No date in the question at "
+    "all = the latest date in the table\n"
+    "- PARTIAL YEARS: 3M = the first quarter of the fiscal year, 6M or H1 = the first two "
+    "quarters, 9M = the first three, each summed from quarterly rows only when all its "
+    "quarters exist, and compared with the same quarters a year earlier. Never use the "
+    "quarters of one for another (3M is not 9M)\n"
+    "- GROWTH: growth_pct = (current - previous) / previous * 100, ONLY when previous > 0; "
+    "otherwise NULL, and NULL never counts as growth. 'X% growth' means growth_pct >= X; "
+    "'not delivered (greater than) X% growth' means growth_pct is NULL or below X. A "
+    "quarter compares with the PREVIOUS quarter unless the question says YoY, year on "
+    "year or same quarter last year; a fiscal year with the previous fiscal year. Fetch "
+    "the previous period by its exact period key with a self-join; never LAG or LEAD\n"
+    "- GROUP GROWTH (sector, industry, any group): per group, SUM the measure over ALL "
+    "members that have both periods (any sign), then growth_pct of the two sums (NULL "
+    "when the previous sum <= 0). When asked, list those members with the group figure\n"
+    "- ONE BASIS PER ENTITY: when the same figure exists on several bases (for example "
+    "Standalone and Consolidated, in one table or in separate tables), use Standalone for "
+    "an entity only if it has Standalone figures for EVERY period the question uses, "
+    "otherwise the other basis. Never add or mix two bases\n"
+    "- MEDIANS AND AVERAGES: exact median with ROW_NUMBER, never approx_percentile: "
+    "(SELECT AVG(x) FROM (SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS rn, COUNT(*) OVER "
+    "() AS n FROM <rows> WHERE x > 0) WHERE rn IN ((n + 1) / 2, (n + 2) / 2)). Medians "
+    "and averages of ratios (P/E, EV/EBITDA, other multiples) use only values > 0\n"
+    "- DAILY SNAPSHOT TABLES (one row per entity per date, possibly duplicated): first "
+    "reduce to one row per entity for ONE date used for all entities (MAX of each column, "
+    "GROUP BY entity), then filter and aggregate\n"
+    "- FIGURES FOR ONE OR MORE DATES (counts, medians, averages per date): ONE ROW PER "
+    "ASKED DATE, newest first: period | as_on_date | company_count | the measures asked. "
+    "Never one wide row with dates in column names. Build it from a dates CTE (one row "
+    "per asked date: a period label and the resolved date) LEFT JOINed to the per-date "
+    "figures, with COALESCE(count, 0), so a date with no data still gets its row with 0 "
+    "and empty figures\n"
+    "- EXACT ARITHMETIC: cast every measure to DECIMAL(38,6) before SUM, AVG or division, "
+    "then ROUND every decimal output to 2 places\n"
+    "- SHOW THE VALUES USED: the previous and current values, the growth or change, and "
+    "any measure the question filters on. FIXED ORDER: ORDER BY the main value DESC "
+    "NULLS LAST, then the entity name, so rows never swap places between runs\n"
+    "- CONSTANT LABEL COLUMNS: a label column (a period, date, sector, category, basis "
+    "or any other non-measure column) whose value is fixed by the question or by your "
+    "filters has the SAME value on every row. Do NOT output it; put that value into the "
+    "name of the value column(s) it describes, as a quoted alias you write yourself: "
+    "company_name | previous_period | previous_value | current_period | current_value | "
+    'growth_pct becomes company_name | "Q2 FY26" | "Q3 FY26" | growth_pct. Keep label '
+    "columns whose values differ between rows, keep every measure column, and apply this "
+    "only when the result has more than one row\n"
+    "- NO MATCHING ROWS: the query must never return an empty result. Write the final "
+    "query as WITH <your CTEs>, result AS (<your final SELECT, no ORDER BY>) SELECT * FROM "
+    "result UNION ALL SELECT <one row> WHERE NOT EXISTS (SELECT 1 FROM result) ORDER BY "
+    "<your order>, where that one row puts a short "
+    "sentence in the first text column and NULL in every other column (CAST NULL to the "
+    "column's type where needed). The sentence says plainly that nothing matched, names "
+    "the period, threshold or filter from the question, and the most likely reason, for "
+    "example 'No results: Q2 FY27 (Jul-Sep 2026) results are not in the data yet.' or "
+    "'No company met the 20% PAT growth test for Q3 FY26.'\n"
     # Join handling. dim_period holds one row per (fye_month, yyyymm): joining on yyyymm
     # alone matches every year-end month, multiplying rows and stamping the wrong fy on
     # them — measured at 36 rows, all mislabelled, for a 3-row question.
@@ -314,14 +354,7 @@ _SHARED_RULES = (
     "repeat across joined rows\n"
     "- Return the SQL in a ```sql code block\n"
     "- After the query, rate your confidence (0.0-1.0) that this query "
-    "correctly answers the question\n"
-    # cuedo-ext: the sentence shown to the user when the query returns no rows.
-    "- Then add ONE line 'Empty result: <sentence>' — what to tell the user if this "
-    "query returns no rows. Say plainly that nothing matched, naming the period, "
-    "threshold or filter from the question, and the most likely reason (for example "
-    "'No results: Q2 FY27 (Jul-Sep 2026) results are not in the data yet.' or 'No "
-    "company met the 20% PAT growth test for Q3 FY26.'). One short sentence, no SQL "
-    "or column names"
+    "correctly answers the question"
 )
 
 _EXAMPLE_SCHEMA = (
@@ -349,15 +382,445 @@ def _ext_entities(entities: str) -> str:
     return f"\n{entities}\n" if entities else ""
 
 
+# cuedo-ext: the dataset rules most often missed, first and last in the system prompt.
+_DATASET_CHECKLIST = """\
+COMPANY FINANCIALS DATASET CHECKLIST (when the schema has historical_market_cap_pe_ev_ebitda or
+combined_profit_and_loss_* tables) - these win over the schema descriptions and any Governed metric block:
+1. market_capitalization of historical_market_cap_pe_ev_ebitda is ALREADY crore: never / 10, never * 10;
+   '1,500 crores' -> market_cap_cr > 1500. Ignore 'INR million' / 'divide by 10' wherever it appears.
+2. Market cap, P/E and EV/EBITDA come ONLY from historical_market_cap_pe_ev_ebitda through the md CTE
+   (MAX per company for ONE date); never finance_metrics_financial_highlights_yearly.market_capitalization.
+3. Profit-and-loss rows: one basis per company through the f CTE (Standalone only if it covers every period).
+4. Relative days (yesterday, end of yesterday, a week ago) are that exact date, never a MAX(date) fallback.
+5. Sector growth counts only companies with both periods (pairs CTE).
+6. 'Not in <period>' / 'not delivered': a missing figure counts as not delivered - LEFT JOIN that period's
+   growth and test COALESCE(growth, 0) < X; never drop the company with an inner join.
+7. Latest / recently concluded quarter or year = the FISCAL CALENDAR line of this prompt, never a later quarter.
+8. Every decimal output is ROUNDed to 2 places. One-row market figures start with as_on_date, company_count.
+9. Copy the structure, column names (lowercase, exactly as listed) and ORDER BY of the closest worked
+   example."""
+
+# cuedo-ext: dataset facts and query templates for the company-financials schema
+# (context-engine). Last in the system prompt so they are read just before the schema.
+_DATASET_RULES = """\
+COMPANY FINANCIALS DATASET - apply ONLY when the schema has historical_market_cap_pe_ev_ebitda or
+combined_profit_and_loss_* tables. For this dataset the facts and worked examples below are the HIGHEST
+authority: they OVERRIDE every table or column description in the schema AND any "Governed metric" block in
+the request. A governed metric only tells you WHICH measure the question means; never copy its SQL
+expression, its per-company filter or its unit conversion - build the query from the examples below.
+
+FACTS
+- UNIT: historical_market_cap_pe_ev_ebitda.market_capitalization is ALREADY in INR crore. NEVER multiply or
+  divide it by anything. The schema description of this column ('INR million', 'divide by 10') and any
+  governed metric that divides it by 10 are WRONG for this dataset - ignore them. Crore numbers in the
+  question are compared AS WRITTEN:
+    RIGHT: WHERE market_cap_cr > 1500            (question: 'above 1,500 crores')
+    RIGHT: WHERE market_cap_cr BETWEEN 1500 AND 12300
+    WRONG: market_capitalization / 10, market_capitalization > 15000, a column named market_cap_million
+- PERIODS: every company uses an April-March fiscal year; never join dim_period or dim_company_fye. yyyymm is
+  the period-END month: FY26 = Apr 2025-Mar 2026, yearly rows of FY26 have yyyymm 202603. Q1 FY26 = 202506,
+  Q2 FY26 = 202509, Q3 FY26 = 202512, Q4 FY26 = 202603, Q1 FY27 = 202606, Q2 FY27 = 202609. A quarter's
+  previous quarter: Q1 FY26 <- Q4 FY25 (202503). 9M FY26 = 202506+202509+202512 vs 202406+202409+202412;
+  6M / H1 FY26 = 202506+202509 vs 202406+202409; 3M FY26 = 202506 vs 202406.
+- RELATIVE PERIODS: work them out from today's date (above) and write the result as literals, exactly as the
+  examples write fixed periods. Latest / recently concluded quarter = the last quarter that ENDED before
+  today; latest fiscal year = the last fiscal year that ENDED before today. If that period has no rows the
+  answer is the no-results row - never fall back to an older period.
+- TABLES (use exactly these):
+  PAT / profit / earnings / net profit = profit_after_tax and EBITDA = operating_profit:
+    quarterly combined_profit_and_loss_derived_quarterly, yearly combined_profit_and_loss_derived_yearly
+  revenue / sales / net sales = net_sales:
+    quarterly combined_profit_and_loss_income_quarterly, yearly combined_profit_and_loss_income_yearly
+  gross margin = gpm (percent): finance_metrics_financial_highlights_yearly
+  market cap, P/E, EV/EBITDA: ONLY historical_market_cap_pe_ev_ebitda, reduced with the md CTE
+- BASIS: profit-and-loss tables hold Standalone and Consolidated rows (column flag): always pick one per
+  company with the f CTE of the examples: count_if(flag = 'Standalone') = <the NUMBER of periods used, as a
+  literal: 2 for two quarters, 20 for the quarters of 5 years>, never COUNT(*); never add or mix the bases.
+- SECTOR names: filter with lower(sector) = lower('<name as the data spells it>'), e.g. 'Auto Ancillary'.
+- MARKET DATA: always reduce with the md CTE for ONE date used for all companies. Explicit calendar date =
+  (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda WHERE date <= DATE '<that date>'), labelled
+  like '15 Jan 2020'. Relative day (yesterday, end of yesterday, a week ago, ...) = that EXACT day from today,
+  labelled with the question's words ('yesterday'); NEVER apply the MAX(date) fallback to it - a relative
+  day with no data still gets its row with company_count 0 and empty figures (example 5). No date in the
+  question = (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda). company_count = the companies
+  the figures are computed over. Several dates = example 5 layout, one row per date.
+- SECTOR / GROUP growth: only companies that have BOTH periods count (the pairs CTE of examples 2 and 3);
+  output the previous and current sums, growth_pct and company_count. If no company has both periods the
+  answer is the no-results row.
+- Q4 (or any quarter's) revenue concentration of a fiscal year = that quarter's net_sales / the SUM of the
+  same year's 4 quarterly net_sales * 100 (never the yearly table), only years with all 4 quarters; fiscal
+  year of a quarter = yyyymm / 100 when month <= 3, else yyyymm / 100 + 1 (example 8). Margin compression
+  in bps = (previous gpm - current gpm) * 100 (example 7); expansion = (current - previous) * 100.
+- SAFE SQL: divide only by NULLIF(x, 0) (the engine may divide before a 'x > 0' filter is applied);
+  market_cap_cr exists only in md (the table column is market_capitalization); the no-results row has
+  exactly one value per column of result (a NULL for each non-text column).
+- EFFICIENT SQL (queries time out after 60 seconds): filter yyyymm IN (...) or date = ... in the FIRST CTE
+  that reads each table, join on company_id, and never scan a table without a period or date filter.
+- NOT DELIVERED / BELOW conditions: a company with no figure for that period counts as not delivered -
+  LEFT JOIN that period's growth and test COALESCE(growth, 0) < X (example 6); never inner join it away.
+- LATEST QUARTER vs the N quarters before it: number the quarters with a VALUES list and self-join on the
+  index (example 9) - this keeps the query fast.
+- NO RESULTS row: for list answers only, exactly 'No results: no company matched for <period labels>.'
+  ('No results: no sector data for <period label>.' for sector lists) - no other words. A one-row figure
+  answer (totals, counts, medians as on a date) never has a no-results row or a note column.
+- COLUMN NAMES (exactly these, in this order): company_name or sector first; period values named by their
+  label ("Q2 FY26", "FY25"); growth_pct; change_bps (margin change in bps, positive = the change asked
+  about); company_count; market_cap_cr last. Market figures: as_on_date, company_count, total_market_cap_cr,
+  companies_below_<N>_cr / companies_above_<N>_cr, median_pe, average_pe, median_ev_ebitda,
+  average_ev_ebitda. Several dates: period, as_on_date, then the same. Growth per period: fy22_growth_pct,
+  nine_m_fy26_growth_pct, h1_fy26_growth_pct, three_m_fy26_growth_pct. Count of years meeting a test:
+  years_q4_above_35 (quarter and threshold from the question).
+
+WORKED EXAMPLES - copy the structure of the closest example: the same CTE names and order, the same
+column names and layout, the same ORDER BY. Change only the measure, table, periods, thresholds and labels.
+
+Example 1: Which companies grew their EBITDA by at least 25% in Q1 FY26?
+```sql
+WITH f AS (
+  SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 2 THEN 'Standalone' ELSE 'Consolidated' END AS
+      use_flag
+  FROM combined_profit_and_loss_derived_quarterly WHERE yyyymm IN (202503, 202506) GROUP BY company_id
+),
+q AS (
+  SELECT d.company_id, d.company_name, d.yyyymm, CAST(d.operating_profit AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_derived_quarterly d JOIN f ON d.company_id = f.company_id AND d.flag =
+      f.use_flag
+  WHERE d.yyyymm IN (202503, 202506) AND d.operating_profit IS NOT NULL
+),
+result AS (
+  SELECT c.company_name, CAST(ROUND(p.v, 2) AS DECIMAL(38,2)) AS "Q4 FY25", CAST(ROUND(c.v,
+      2) AS DECIMAL(38,2)) AS "Q1 FY26",
+         CAST(ROUND((c.v - p.v) / NULLIF(p.v, 0) * 100, 2) AS DECIMAL(38,2)) AS growth_pct
+  FROM q c JOIN q p ON p.company_id = c.company_id AND c.yyyymm = 202506 AND p.yyyymm = 202503
+  WHERE p.v > 0 AND (c.v - p.v) / NULLIF(p.v, 0) * 100 >= 25
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no company matched for Q1 FY26.', NULL, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY growth_pct DESC NULLS LAST, company_name
+```
+
+Example 2: What was the revenue growth of every sector in Q2 FY26?
+```sql
+WITH f AS (
+  SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 2 THEN 'Standalone' ELSE 'Consolidated' END AS
+      use_flag
+  FROM combined_profit_and_loss_income_quarterly WHERE yyyymm IN (202506, 202509) GROUP BY company_id
+),
+q AS (
+  SELECT d.company_id, d.company_name, d.sector, d.yyyymm, CAST(d.net_sales AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_income_quarterly d JOIN f ON d.company_id = f.company_id AND d.flag = f.use_flag
+  WHERE d.yyyymm IN (202506, 202509) AND d.net_sales IS NOT NULL
+),
+pairs AS (
+  SELECT c.sector, c.company_name, p.v AS pv, c.v AS cv
+  FROM q c JOIN q p ON p.company_id = c.company_id AND c.yyyymm = 202509 AND p.yyyymm = 202506
+),
+result AS (
+  SELECT sector, CAST(ROUND(SUM(pv), 2) AS DECIMAL(38,2)) AS "Q1 FY26", CAST(ROUND(SUM(cv),
+      2) AS DECIMAL(38,2)) AS "Q2 FY26",
+         CASE WHEN SUM(pv) > 0 THEN CAST(ROUND((SUM(cv) - SUM(pv)) / NULLIF(SUM(pv), 0) * 100,
+             2) AS DECIMAL(38,2)) END AS growth_pct,
+         COUNT(*) AS company_count
+  FROM pairs GROUP BY sector
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no sector data for Q2 FY26.', NULL, NULL, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY growth_pct DESC NULLS LAST, sector
+```
+
+Example 3: What was the PAT growth of the Paints sector in Q2 FY26? List the companies used.
+```sql
+WITH f AS (
+  SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 2 THEN 'Standalone' ELSE 'Consolidated' END AS
+      use_flag
+  FROM combined_profit_and_loss_derived_quarterly WHERE lower(sector) = lower('Paints') AND yyyymm IN (202506,
+      202509)
+  GROUP BY company_id
+),
+q AS (
+  SELECT d.company_id, d.company_name, d.yyyymm, CAST(d.profit_after_tax AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_derived_quarterly d JOIN f ON d.company_id = f.company_id AND d.flag =
+      f.use_flag
+  WHERE lower(d.sector) = lower('Paints') AND d.yyyymm IN (202506, 202509) AND d.profit_after_tax IS NOT NULL
+),
+pairs AS (
+  SELECT c.company_name, p.v AS pv, c.v AS cv
+  FROM q c JOIN q p ON p.company_id = c.company_id AND c.yyyymm = 202509 AND p.yyyymm = 202506
+),
+tot AS (SELECT SUM(pv) AS sp, SUM(cv) AS sc, COUNT(*) AS n FROM pairs),
+result AS (
+  SELECT pairs.company_name, CAST(ROUND(pv, 2) AS DECIMAL(38,2)) AS "Q1 FY26", CAST(ROUND(cv,
+      2) AS DECIMAL(38,2)) AS "Q2 FY26",
+         CAST(ROUND(tot.sp, 2) AS DECIMAL(38,2)) AS "Paints Q1 FY26", CAST(ROUND(tot.sc,
+             2) AS DECIMAL(38,2)) AS "Paints Q2 FY26",
+         CASE WHEN tot.sp > 0 THEN CAST(ROUND((tot.sc - tot.sp) / NULLIF(tot.sp, 0) * 100,
+             2) AS DECIMAL(38,2)) END AS "Paints growth_pct",
+         tot.n AS company_count
+  FROM pairs CROSS JOIN tot
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no Paints company has PAT for Q1 FY26 and Q2 FY26.', NULL, NULL, NULL, NULL, NULL, NULL
+WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY company_name
+```
+
+Example 4: On 10th March 2022, for companies with market cap between 2,000 and 8,000 crores: their total market
+    cap, median EV/EBITDA, average P/E, and how many were below 3,000 crores?
+```sql
+WITH md AS (
+  SELECT company_id, MAX(market_capitalization) AS market_cap_cr,  -- already crore, never scaled
+         MAX(pe) AS pe, MAX(ev_ebitda) AS ev_ebitda
+  FROM historical_market_cap_pe_ev_ebitda
+  WHERE date = (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda WHERE date <= DATE '2022-03-10')
+  GROUP BY company_id
+),
+f AS (SELECT * FROM md WHERE market_cap_cr BETWEEN 2000 AND 8000),  -- '2,000 and 8,000 crores' as written
+e AS (SELECT CAST(ev_ebitda AS DECIMAL(38,6)) AS x, ROW_NUMBER() OVER (ORDER BY ev_ebitda) AS rn,
+    COUNT(*) OVER () AS n
+      FROM f WHERE ev_ebitda > 0)
+SELECT DATE '2022-03-10' AS as_on_date, (SELECT COUNT(*) FROM f) AS company_count,
+       (SELECT CAST(ROUND(SUM(CAST(market_cap_cr AS DECIMAL(38,6))),
+           2) AS DECIMAL(38,2)) FROM f) AS total_market_cap_cr,
+       (SELECT CAST(ROUND(AVG(x), 2) AS DECIMAL(38,2)) FROM e WHERE rn IN ((n + 1) / 2,
+           (n + 2) / 2)) AS median_ev_ebitda,
+       (SELECT CAST(ROUND(AVG(CAST(pe AS DECIMAL(38,6))),
+           2) AS DECIMAL(38,2)) FROM f WHERE pe > 0) AS average_pe,
+       (SELECT COUNT_IF(market_cap_cr < 3000) FROM f) AS companies_below_3000_cr
+```
+
+Example 5: Compare the median and average P/E of companies above 5,000 crores market cap a week ago and on 1
+    June 2021.
+```sql
+WITH dates AS (
+  SELECT 'a week ago' AS label, date_add('day', -7, current_date) AS d
+  UNION ALL
+  SELECT '1 Jun 2021', (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda WHERE date <= DATE
+      '2021-06-01')
+),
+md AS (
+  SELECT dates.label, h.date, h.company_id,
+         MAX(h.market_capitalization) AS market_cap_cr,  -- already crore, never scaled
+         MAX(h.pe) AS pe,
+         MAX(h.ev_ebitda) AS ev_ebitda
+  FROM historical_market_cap_pe_ev_ebitda h JOIN dates ON h.date = dates.d GROUP BY dates.label, h.date,
+      h.company_id
+),
+f AS (SELECT * FROM md WHERE market_cap_cr > 5000),  -- '5,000 crores' as written
+p AS (SELECT label, CAST(pe AS DECIMAL(38,6)) AS x, ROW_NUMBER() OVER (PARTITION BY label ORDER BY pe) AS rn,
+             COUNT(*) OVER (PARTITION BY label) AS n FROM f WHERE pe > 0),
+agg AS (
+  SELECT label, COUNT(*) AS company_count,
+         CAST(ROUND(AVG(CAST(pe AS DECIMAL(38,6))) FILTER (WHERE pe > 0), 2) AS DECIMAL(38,2)) AS average_pe
+  FROM f GROUP BY label
+),
+mp AS (SELECT label, CAST(ROUND(AVG(x), 2) AS DECIMAL(38,2)) AS median_pe FROM p WHERE rn IN ((n + 1) / 2,
+    (n + 2) / 2)
+       GROUP BY label)
+SELECT dates.label AS period, dates.d AS as_on_date, COALESCE(agg.company_count, 0) AS company_count,
+    mp.median_pe,
+       agg.average_pe
+FROM dates LEFT JOIN agg ON agg.label = dates.label LEFT JOIN mp ON mp.label = dates.label
+ORDER BY dates.d DESC
+```
+
+Example 6: Which companies grew PAT by 15% or more in FY23 and FY24, but not in FY25 and H1 FY26?
+```sql
+WITH yb AS (
+  SELECT company_id, company_name, flag, yyyymm, CAST(profit_after_tax AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_derived_yearly WHERE yyyymm IN (202203, 202303, 202403, 202503)
+),
+yf AS (SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 4 THEN 'Standalone' ELSE 'Consolidated' END
+    AS use_flag
+       FROM yb GROUP BY company_id),
+y AS (SELECT yb.* FROM yb JOIN yf ON yb.company_id = yf.company_id AND yb.flag = yf.use_flag),
+yg AS (
+  SELECT c.company_id, MAX(c.company_name) AS company_name,
+         MAX(CASE WHEN c.yyyymm = 202303 AND p.v > 0 THEN (c.v - p.v) / NULLIF(p.v, 0) * 100 END) AS g23,
+         MAX(CASE WHEN c.yyyymm = 202403 AND p.v > 0 THEN (c.v - p.v) / NULLIF(p.v, 0) * 100 END) AS g24,
+         MAX(CASE WHEN c.yyyymm = 202503 AND p.v > 0 THEN (c.v - p.v) / NULLIF(p.v, 0) * 100 END) AS g25
+  FROM y c JOIN y p ON p.company_id = c.company_id AND p.yyyymm = c.yyyymm - 100 GROUP BY c.company_id
+),
+qb AS (
+  SELECT company_id, flag, yyyymm, CAST(profit_after_tax AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_derived_quarterly WHERE yyyymm IN (202406, 202409, 202506, 202509)
+),
+qf AS (SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 4 THEN 'Standalone' ELSE 'Consolidated' END
+    AS use_flag
+       FROM qb GROUP BY company_id),
+h1 AS (
+  SELECT qb.company_id,
+         CASE WHEN COUNT_IF(yyyymm IN (202506, 202509) AND v IS NOT NULL) = 2
+              THEN SUM(CASE WHEN yyyymm IN (202506, 202509) THEN v END) END AS cur,
+         CASE WHEN COUNT_IF(yyyymm IN (202406, 202409) AND v IS NOT NULL) = 2
+              THEN SUM(CASE WHEN yyyymm IN (202406, 202409) THEN v END) END AS prev
+  FROM qb JOIN qf ON qb.company_id = qf.company_id AND qb.flag = qf.use_flag GROUP BY qb.company_id
+),
+r AS (SELECT yg.*, CASE WHEN h1.prev > 0 THEN (h1.cur - h1.prev) / NULLIF(h1.prev, 0) * 100 END AS gh1
+      FROM yg LEFT JOIN h1 ON h1.company_id = yg.company_id),
+result AS (
+  SELECT company_name, CAST(ROUND(g23, 2) AS DECIMAL(38,2)) AS fy23_growth_pct, CAST(ROUND(g24,
+      2) AS DECIMAL(38,2)) AS fy24_growth_pct,
+         CAST(ROUND(g25, 2) AS DECIMAL(38,2)) AS fy25_growth_pct, CAST(ROUND(gh1,
+             2) AS DECIMAL(38,2)) AS h1_fy26_growth_pct
+  FROM r WHERE g23 >= 15 AND g24 >= 15 AND COALESCE(g25, 0) < 15 AND COALESCE(gh1, 0) < 15
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no company matched for FY23-FY25 and H1 FY26.', NULL, NULL, NULL,
+    NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY fy24_growth_pct DESC NULLS LAST, company_name
+```
+
+Example 7: Companies with market cap below 3,000 crores whose gross margin fell by 150 bps or more.
+```sql
+WITH g AS (
+  SELECT h.company_id, MAX(h.company_name) AS company_name, h.yyyymm, MAX(CAST(h.gpm AS DECIMAL(38,6))) AS gpm
+  FROM finance_metrics_financial_highlights_yearly h WHERE h.yyyymm IN (202503, 202603) GROUP BY h.company_id,
+      h.yyyymm
+),
+d AS (
+  SELECT c.company_id, c.company_name, p.gpm AS pg, c.gpm AS cg
+  FROM g c JOIN g p ON p.company_id = c.company_id WHERE c.yyyymm = 202603 AND p.yyyymm = 202503
+),
+md AS (
+  SELECT company_id, MAX(market_capitalization) AS market_cap_cr  -- already crore, never scaled
+  FROM historical_market_cap_pe_ev_ebitda
+  WHERE date = (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda) GROUP BY company_id
+),
+result AS (
+  SELECT d.company_name, CAST(ROUND(d.pg, 2) AS DECIMAL(38,2)) AS "FY25", CAST(ROUND(d.cg,
+      2) AS DECIMAL(38,2)) AS "FY26",
+         CAST(ROUND((d.pg - d.cg) * 100, 2) AS DECIMAL(38,2)) AS change_bps,
+         CAST(ROUND(md.market_cap_cr, 2) AS DECIMAL(38,2)) AS market_cap_cr
+  FROM d JOIN md ON md.company_id = d.company_id
+  WHERE md.market_cap_cr < 3000 AND (d.pg - d.cg) * 100 >= 150
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no company matched for FY26.', NULL, NULL, NULL,
+    NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY change_bps DESC NULLS LAST, company_name
+```
+
+Example 8: Companies whose Q3 net sales were more than 30% of the year's net sales in at least 2 of the last 4
+    fiscal years, with market cap above 1,000 crores.
+```sql
+WITH fy AS (SELECT 2026 AS last_fy),
+q AS (
+  SELECT company_id, company_name, flag, yyyymm, CAST(net_sales AS DECIMAL(38,6)) AS v,
+         CASE WHEN yyyymm % 100 <= 3 THEN yyyymm / 100 ELSE yyyymm / 100 + 1 END AS fiscal_year
+  FROM combined_profit_and_loss_income_quarterly CROSS JOIN fy
+  WHERE net_sales IS NOT NULL AND yyyymm % 100 IN (3, 6, 9, 12)
+    AND (CASE WHEN yyyymm % 100 <= 3 THEN yyyymm / 100 ELSE yyyymm / 100 + 1 END) BETWEEN fy.last_fy - 3 AND
+        fy.last_fy
+),
+f AS (SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 16 THEN 'Standalone' ELSE 'Consolidated' END
+    AS use_flag
+      FROM q GROUP BY company_id),
+y AS (
+  SELECT q.company_id, MAX(q.company_name) AS company_name, q.fiscal_year, SUM(q.v) AS total,
+         SUM(CASE WHEN q.yyyymm % 100 = 12 THEN q.v END) AS q3
+  FROM q JOIN f ON q.company_id = f.company_id AND q.flag = f.use_flag GROUP BY q.company_id,
+      q.fiscal_year HAVING COUNT(*) = 4
+),
+c AS (
+  SELECT company_id, MAX(company_name) AS company_name, COUNT_IF(total > 0 AND q3 / NULLIF(total,
+      0) * 100 > 30) AS years_q3_above_30
+  FROM y GROUP BY company_id HAVING COUNT_IF(total > 0 AND q3 / NULLIF(total, 0) * 100 > 30) >= 2
+),
+md AS (
+  SELECT company_id, MAX(market_capitalization) AS market_cap_cr  -- already crore, never scaled
+  FROM historical_market_cap_pe_ev_ebitda
+  WHERE date = (SELECT MAX(date) FROM historical_market_cap_pe_ev_ebitda) GROUP BY company_id
+),
+result AS (
+  SELECT c.company_name, c.years_q3_above_30, CAST(ROUND(md.market_cap_cr, 2) AS DECIMAL(38,2)) AS market_cap_cr
+  FROM c JOIN md ON md.company_id = c.company_id WHERE md.market_cap_cr > 1000
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no company matched for the last 4 fiscal years.', NULL,
+    NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY years_q3_above_30 DESC NULLS LAST, company_name
+```
+
+Example 9: Which companies grew net sales by more than 10% in Q1 FY26,
+    but not by more than 10% in any of the 4 quarters before it?
+```sql
+WITH per AS (
+  SELECT * FROM (VALUES (0, 202506), (1, 202503), (2, 202412), (3, 202409), (4, 202406), (5, 202403)) AS t (i,
+      yyyymm)
+),
+f AS (
+  SELECT company_id, CASE WHEN count_if(flag = 'Standalone') = 6 THEN 'Standalone' ELSE 'Consolidated' END AS
+      use_flag
+  FROM combined_profit_and_loss_income_quarterly WHERE yyyymm IN (202403, 202406, 202409, 202412, 202503,
+      202506)
+  GROUP BY company_id
+),
+q AS (
+  SELECT d.company_id, d.company_name, per.i, CAST(d.net_sales AS DECIMAL(38,6)) AS v
+  FROM combined_profit_and_loss_income_quarterly d JOIN f ON d.company_id = f.company_id AND d.flag = f.use_flag
+  JOIN per ON d.yyyymm = per.yyyymm
+  WHERE d.yyyymm IN (202403, 202406, 202409, 202412, 202503, 202506) AND d.net_sales IS NOT NULL
+),
+g AS (
+  SELECT c.company_id, c.company_name, c.i, p.v AS pv, c.v AS cv,
+         CASE WHEN p.v > 0 THEN (c.v - p.v) / NULLIF(p.v, 0) * 100 END AS gp
+  FROM q c JOIN q p ON p.company_id = c.company_id AND p.i = c.i + 1
+  WHERE c.i BETWEEN 0 AND 4
+),
+result AS (
+  SELECT l.company_name, CAST(ROUND(l.pv, 2) AS DECIMAL(38,2)) AS "Q4 FY25", CAST(ROUND(l.cv,
+      2) AS DECIMAL(38,2)) AS "Q1 FY26",
+         CAST(ROUND(l.gp, 2) AS DECIMAL(38,2)) AS growth_pct
+  FROM g l
+  WHERE l.i = 0 AND l.gp > 10
+    AND NOT EXISTS (SELECT 1 FROM g e WHERE e.company_id = l.company_id AND e.i BETWEEN 1 AND 4 AND e.gp > 10)
+)
+SELECT * FROM result
+UNION ALL
+SELECT 'No results: no company matched for Q1 FY26.', NULL, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM result)
+ORDER BY growth_pct DESC NULLS LAST, company_name
+```"""
+
+
+def _fiscal_calendar(today: date) -> str:
+    """cuedo-ext: the ended April-March fiscal periods as of ``today``, for the dataset rules.
+
+    Written out so the model reads 'latest quarter' instead of working it out (it got
+    it wrong in about one run in six).
+    """
+    quarters = []
+    year, month = today.year, today.month - (today.month - 1) % 3 - 1  # end month of the previous quarter
+    if month == 0:
+        year, month = year - 1, 12
+    for _ in range(12):
+        fy = year + 1 if month > 3 else year
+        quarters.append(f"Q{(month + 8) % 12 // 3 + 1} FY{fy % 100:02d} = {year * 100 + month}")
+        year, month = (year, month - 3) if month > 3 else (year - 1, month + 9)
+    fy_end = today.year if today.month > 3 else today.year - 1
+    return (
+        "COMPANY FINANCIALS FISCAL CALENDAR as of today (April-March fiscal year): latest concluded quarter = "
+        f"{quarters[0]}; latest concluded fiscal year = FY{fy_end % 100:02d} = {fy_end * 100 + 3}. "
+        f"Ended quarters, newest first: {', '.join(quarters)}."
+    )
+
+
 def _build_system_prompt(dialect: str) -> str:
     """Build the system prompt for the given SQL dialect."""
     config = _DIALECT_CONFIGS.get(dialect, _DIALECT_CONFIGS["athena"])
+    today = datetime.now(UTC).date()
     return (
         f"You are a SQL query generator for a data warehouse running on "
         f"{config['engine_description']}.\n\n"
         # Read at call time, not import time: a long-lived process would otherwise
         # answer "this year" with the date it started on.
-        f"Today's date is {datetime.now(UTC).date().isoformat()}.\n\n"
+        f"Today's date is {today.isoformat()}.\n\n"
+        f"{_DATASET_CHECKLIST}\n{_fiscal_calendar(today)}\n\n"  # cuedo-ext
         f"CRITICAL RULES:\n"
         f"{_SHARED_RULES}\n"
         f"{config['syntax_rules']}\n\n"
@@ -365,7 +828,9 @@ def _build_system_prompt(dialect: str) -> str:
         f"Schema:\n{_EXAMPLE_SCHEMA}\n\n"
         f"Question: What is the total revenue by region for 2024?\n"
         f"```sql\n{config['example_sql']}\n```\n"
-        f"Confidence: 0.9"
+        f"Confidence: 0.9\n\n"
+        f"{_DATASET_RULES}\n\n"  # cuedo-ext
+        f"FINAL CHECK - {_DATASET_CHECKLIST}"
     )
 
 
@@ -423,8 +888,6 @@ class NLtoSQLResult:
     # (interest_cover rising is good, finance_cost rising is bad). Empty when
     # the writer gave no verdict; the caller then falls back to its own rule.
     column_direction: dict[str, str] = field(default_factory=dict)
-    # cuedo-ext: sentence for the user when the query returns no rows ("" = none).
-    empty_message: str = ""
 
 
 class SQLGenerator:
@@ -521,7 +984,6 @@ class SQLGenerator:
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
         pinned_tables: list[str] | None = None,  # cuedo-ext: governed metric's tables
-        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -552,8 +1014,6 @@ class SQLGenerator:
                 (extensions/entity-resolution). Empty → no section.
             pinned_tables: cuedo-ext — a forwarded governed metric's tables, added to
                 the retrieved classes when similarity missed them.
-            top_p: cuedo-ext — answer-consistency nucleus-sampling cutoff for the
-                SQL-writing call (extensions/answer-consistency). None → not sent.
         """
         trace: list[dict[str, Any]] = []
 
@@ -754,7 +1214,7 @@ class SQLGenerator:
         # Step 5: Generate SQL via LLM
         start = time.perf_counter()
         try:
-            sql, confidence, column_direction, empty_message = await self._generate_sql(
+            sql, confidence, column_direction = await self._generate_sql(
                 question,
                 ddl_context,
                 evidence,
@@ -762,7 +1222,6 @@ class SQLGenerator:
                 dialect=dialect,
                 governed_metric=governed_metric,
                 entities=entities,  # cuedo-ext
-                top_p=top_p,  # cuedo-ext
             )
             trace.append({"step": "generate_sql", "status": "ok", "ms": _ms(start), "confidence": confidence})
         except Exception as e:
@@ -791,7 +1250,6 @@ class SQLGenerator:
             ddl_context=ddl_context,
             table_sources=_hit_table_source_map(hits),
             column_direction=column_direction,
-            empty_message=empty_message,  # cuedo-ext
         )
 
     async def generate_from_context(
@@ -828,7 +1286,7 @@ class SQLGenerator:
         # A correction re-runs the SAME question, so its column favourability is
         # the one the first pass already recorded on the result; dropping it here
         # keeps this method's established 2-tuple contract with its callers.
-        sql, confidence, _direction, _empty = await self._generate_sql(
+        sql, confidence, _direction = await self._generate_sql(
             question,
             ddl_context,
             evidence,
@@ -849,7 +1307,6 @@ class SQLGenerator:
         model_id: str | None = None,
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
-        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
     ) -> tuple[str, float]:
         """LLM-driven repair of a SQL statement that failed to execute.
 
@@ -908,7 +1365,6 @@ class SQLGenerator:
             system=self._system_prompt,
             max_tokens=max_tokens,
             temperature=0,
-            top_p=top_p,  # cuedo-ext
             model_id=model_id,
         )
         _warn_if_truncated(result, max_tokens, step="correct")
@@ -940,8 +1396,7 @@ class SQLGenerator:
         feedback: str = "",
         governed_metric: str = "",
         entities: str = "",  # cuedo-ext: entity-resolution prompt section
-        top_p: float | None = None,  # cuedo-ext: answer-consistency sampling (None = not sent)
-    ) -> tuple[str, float, dict[str, str], str]:  # cuedo-ext: + empty-result sentence
+    ) -> tuple[str, float, dict[str, str]]:
         """Call LLM to generate SQL from question and DDL context.
 
         Args:
@@ -962,7 +1417,6 @@ class SQLGenerator:
                 chars. Given, the writer extends the governed formula instead of
                 reinventing one.
             entities: cuedo-ext — entity-resolution prompt section. Empty → none.
-            top_p: cuedo-ext — answer-consistency sampling cutoff. None → not sent.
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -1036,7 +1490,6 @@ class SQLGenerator:
             system=system_prompt,
             max_tokens=max_tokens,
             temperature=0,
-            top_p=top_p,  # cuedo-ext
             model_id=model_id,
             guardrail_id=self._effective_guardrail_id(),
             # Sent unconditionally: this is the ONLY channel for the user's
@@ -1050,7 +1503,7 @@ class SQLGenerator:
         _sqlprobe = _extract_sql(result.text)
         direction = _extract_direction(result.text)
         logger.info("sql_probe", question=question[:100], sql=_sqlprobe, direction=direction)
-        return _sqlprobe, _extract_confidence(result.text), direction, _extract_empty_message(result.text)
+        return _sqlprobe, _extract_confidence(result.text), direction
 
 
 def _warn_if_truncated(result: ConverseResult, max_tokens: int, *, step: str) -> None:
@@ -1384,12 +1837,6 @@ def _extract_confidence(text: str) -> float:
     if match:
         return min(float(match.group(1)), 1.0)
     return 0.5
-
-
-def _extract_empty_message(text: str) -> str:
-    """cuedo-ext: the reply's 'Empty result:' sentence, or "" when absent."""
-    match = _EMPTY_RESULT_RE.search(text)
-    return match.group(1).strip().strip("*`").strip()[:300] if match else ""
 
 
 def _extract_direction(text: str) -> dict[str, str]:

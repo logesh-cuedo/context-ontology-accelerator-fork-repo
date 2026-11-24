@@ -25,7 +25,6 @@ one correction shot. Correction likewise fires on a true execution error.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import time
@@ -350,14 +349,6 @@ class NLtoSQLStrategy:
         # cuedo-ext: entity filters from extensions/entity-resolution (set by the
         # orchestrator hook); empty leaves the prompt as upstream builds it.
         entities = options.get("resolvedEntities", "")
-        # cuedo-ext: extensions/answer-consistency — the namespace's rules join the
-        # prompt, sampling is fixed, and a question answered before reuses its SQL
-        # (firewall and execution still run). Absent → nothing changes.
-        consistency = options.get("_consistency")
-        if consistency is not None and consistency.rules:
-            entities = f"{consistency.rules}\n{entities}" if entities else consistency.rules
-        top_p = consistency.top_p if consistency is not None else None
-        cached = consistency.cached if consistency is not None else None
         # Request-scoped: the tool caches this namespace's FK edges and named graphs
         # for the life of the object, and that cache must not outlive a request (a
         # namespace can be re-ingested between two of them). No catalog is passed —
@@ -368,28 +359,24 @@ class NLtoSQLStrategy:
             if (_graph_expand_enabled(options) and self._graph_client is not None)
             else None
         )
-        if cached:  # cuedo-ext: the SQL this question got before
-            nl_to_sql_result = _ext_cached_result(cached)
-        else:
-            nl_to_sql_result = await self._sql_generator.generate(
-                query,
-                namespace=namespace,
-                index=index_name,
-                evidence=evidence,
-                embedding=embedding,
-                model_id=context.model_id,
-                dialect=dialect,
-                graph_expander=graph_expander,
-                # Forward the declined governed definition — but only when it is safe to
-                # (a real formula, and a source that does not contradict the one resolved
-                # here). ``data_source_id`` at this point is the request pin (empty when
-                # unpinned, so pre-retrieval we forward best-effort). Empty on every
-                # non-declining path, keeping the prompt byte-identical to the baseline.
-                governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
-                entities=entities,
-                pinned_tables=_ext_metric_tables(context.declined_metric, data_source_id),  # cuedo-ext
-                top_p=top_p,  # cuedo-ext
-            )
+        nl_to_sql_result = await self._sql_generator.generate(
+            query,
+            namespace=namespace,
+            index=index_name,
+            evidence=evidence,
+            embedding=embedding,
+            model_id=context.model_id,
+            dialect=dialect,
+            graph_expander=graph_expander,
+            # Forward the declined governed definition — but only when it is safe to
+            # (a real formula, and a source that does not contradict the one resolved
+            # here). ``data_source_id`` at this point is the request pin (empty when
+            # unpinned, so pre-retrieval we forward best-effort). Empty on every
+            # non-declining path, keeping the prompt byte-identical to the baseline.
+            governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
+            entities=entities,
+            pinned_tables=_ext_metric_tables(context.declined_metric, data_source_id),  # cuedo-ext
+        )
 
         t_ms = int((time.perf_counter() - t_start) * 1000)
 
@@ -505,7 +492,6 @@ class NLtoSQLStrategy:
                     expanded_tables=nl_to_sql_result.expanded_tables,
                     data_source_id=nl_to_sql_result.data_source_id or "",
                     column_direction=nl_to_sql_result.column_direction,
-                    empty_message=nl_to_sql_result.empty_message,  # cuedo-ext
                 )
                 tables = tables_visible_to(
                     nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables, profile
@@ -525,8 +511,6 @@ class NLtoSQLStrategy:
                     fw_result.authorized_sql, query
                 )
                 final_empty = exec_result.row_count == 0 and (user_value_filter or shot >= self._max_shots)
-                if cached:  # cuedo-ext: a stored SQL's empty result is its answer; never re-generate it
-                    final_empty = exec_result.row_count == 0
                 trace.record(
                     StepId.T2_SQL_EXECUTE,
                     "success",
@@ -546,8 +530,6 @@ class NLtoSQLStrategy:
                         "userValueFilter": user_value_filter,
                     },
                 )
-                if exec_result.row_count > 0 and consistency is not None:  # cuedo-ext: remember this SQL
-                    await asyncio.to_thread(consistency.save, _ext_cache_entry(sql, confidence, nl_to_sql_result))
                 if exec_result.row_count > 0 or final_empty:
                     return result if exec_result.row_count > 0 else (empty_fallback or result)
                 # Zero rows, no user-supplied literal, a shot remains: keep the
@@ -647,7 +629,6 @@ class NLtoSQLStrategy:
                     # fed into the correction, which would otherwise burn the shot.
                     governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
                     entities=entities,
-                    top_p=top_p,  # cuedo-ext
                 )
                 correct_ms = int((time.perf_counter() - correct_start) * 1000)
                 if not sql:
@@ -766,34 +747,3 @@ class NLtoSQLStrategy:
             tool_used="sql-firewall",
         )
         return fw_result
-
-
-def _ext_cached_result(cached: dict) -> NLtoSQLResult:
-    """cuedo-ext: rebuild the SQL generator's result from an answer-consistency cache entry."""
-    return NLtoSQLResult(
-        sql=cached["sql"],
-        confidence=float(cached.get("confidence") or 0.5),
-        retrieved_tables=list(cached.get("retrieved_tables") or []),
-        expanded_tables=list(cached.get("expanded_tables") or []),
-        trace_steps=[{"step": "generate_sql", "status": "cached"}],
-        data_source_id=cached.get("data_source_id") or "",
-        ddl_context=cached.get("ddl_context") or "",
-        table_sources=dict(cached.get("table_sources") or {}),
-        column_direction=dict(cached.get("column_direction") or {}),
-        empty_message=str(cached.get("empty_message") or ""),
-    )
-
-
-def _ext_cache_entry(sql: str, confidence: float, result: NLtoSQLResult) -> dict:
-    """cuedo-ext: what answer-consistency stores to run this SQL again."""
-    return {
-        "sql": sql,
-        "confidence": confidence,
-        "data_source_id": result.data_source_id,
-        "retrieved_tables": result.retrieved_tables,
-        "expanded_tables": result.expanded_tables,
-        "table_sources": result.table_sources,
-        "ddl_context": result.ddl_context,
-        "column_direction": result.column_direction,
-        "empty_message": result.empty_message,
-    }

@@ -123,7 +123,6 @@ class Orchestrator:
         tier3_deep_reasoning_default: bool = False,
         tier1_metric_timeout_s: int = 35,
         entity_hook: Any = None,  # cuedo-ext: extensions/entity-resolution
-        consistency_hook: Any = None,  # cuedo-ext: extensions/answer-consistency
     ):
         """Wire the per-tier resolvers and optional gating/skip helpers.
 
@@ -151,10 +150,6 @@ class Orchestrator:
             tier1_metric_timeout_s: Configured Tier-1 statement timeout (1..300).
             entity_hook: cuedo-ext — optional ``coa_entity.serve_hook.EntityHook``
                 (extensions/entity-resolution). None leaves Tier 2 unchanged.
-            consistency_hook: cuedo-ext — optional
-                ``coa_consistency.serve_hook.ConsistencyHook`` (extensions/answer-consistency):
-                per-namespace SQL rules, fixed sampling and an SQL cache. None leaves
-                Tier 2 unchanged.
         """
         self._metric_resolver = metric_resolver
         self._knowledge_retriever = knowledge_retriever
@@ -194,7 +189,6 @@ class Orchestrator:
             raise ValueError("tier1_metric_timeout_s must be in the range 1..300")
         self._tier1_metric_timeout_s = tier1_metric_timeout_s
         self._entity_hook = entity_hook  # cuedo-ext
-        self._consistency_hook = consistency_hook  # cuedo-ext
 
     async def resolve(
         self,
@@ -323,10 +317,6 @@ class Orchestrator:
 
         # ── Tier 2: strategy-based structured query ────────────────
         strategy = self._resolve_strategy_selection(options, tier_override)
-        # cuedo-ext: answer-consistency may pin the namespace's default strategy
-        # (e.g. NL->SQL only, no fallback to a different engine's answer).
-        if self._consistency_hook is not None and strategy is not None and not options.get("strategy"):
-            strategy = await self._consistency_hook.strategy_for(namespace, strategy)
         if await self._should_run_tier2(
             strategy, gating, tier_override, options, query, namespace, query_embedding, trace
         ):
@@ -343,11 +333,6 @@ class Orchestrator:
                     return self._entity_hook.clarification_response(ext.clarification, trace, meta)
                 if ext.sql_context:
                     tier2_options = {**options, "resolvedEntities": ext.sql_context}
-            # cuedo-ext: same question, same answer — rules, sampling and cached SQL for NL->SQL.
-            if self._consistency_hook is not None:
-                consistency = await self._consistency_hook.before_tier2(query, namespace, metric_definitions, trace)
-                if consistency is not None:
-                    tier2_options = {**tier2_options, "_consistency": consistency}
             strategy_result, tier2_sparql = await self._run_tier2(
                 query,
                 namespace,
@@ -837,7 +822,6 @@ class Orchestrator:
                     strategy=result.strategy_name,
                     model_id=model_id,
                     include_debug_info=include_debug_info,
-                    empty_message=result.empty_message,  # cuedo-ext
                 )
             )
 

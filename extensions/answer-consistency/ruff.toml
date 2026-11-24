@@ -1,6 +1,0 @@
-# Inherit the repo's rules; tests live in consistency_tests/ (not tests/) so pytest
-# does not clash with serve's `tests` package.
-extend = "../../ruff.toml"
-
-[lint.per-file-ignores]
-"consistency_tests/**" = ["E402", "D"]

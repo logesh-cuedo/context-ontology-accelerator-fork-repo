@@ -61,11 +61,6 @@ try:
     from coa_entity.serve_hook import build_entity_hook
 except ImportError:  # pragma: no cover - extension not installed
     build_entity_hook = None
-# cuedo-ext: same question, same answer (extensions/answer-consistency). Optional.
-try:
-    from coa_consistency.serve_hook import build_consistency_hook
-except ImportError:  # pragma: no cover - extension not installed
-    build_consistency_hook = None  # type: ignore[assignment]
 from .tier2.nl_to_sql.agentic_strategy import AgenticStrategy
 from .tier2.nl_to_sql.sql_generator import SQLGenerator
 from .tier2.nl_to_sql.strategy import NLtoSQLStrategy
@@ -447,7 +442,6 @@ async def _ensure_initialized():
             tier3_deep_reasoning_default=(config.tier3_strategy == "deep-reasoning"),
             tier1_metric_timeout_s=config.tier1_metric_timeout_s,
             entity_hook=entity_hook,  # cuedo-ext
-            consistency_hook=build_consistency_hook() if build_consistency_hook is not None else None,  # cuedo-ext
         )
         _config = config
         logger.info(

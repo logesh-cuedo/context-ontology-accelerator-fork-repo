@@ -43,10 +43,6 @@ RUN pip install --no-cache-dir uv && \
 # not invalidate the slow dependency layer.
 COPY extensions/entity-resolution/ /tmp/entity-resolution/
 RUN pip install --no-cache-dir --no-deps /tmp/entity-resolution/ && rm -rf /tmp/entity-resolution/
-# cuedo-ext: same question, same answer (extensions/answer-consistency). Off unless a
-# namespace has an SSM config; installed --no-deps for the same reason.
-COPY extensions/answer-consistency/ /tmp/answer-consistency/
-RUN pip install --no-cache-dir --no-deps /tmp/answer-consistency/ && rm -rf /tmp/answer-consistency/
 
 EXPOSE 8080
 
