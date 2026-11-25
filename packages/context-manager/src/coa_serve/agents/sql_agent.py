@@ -145,10 +145,6 @@ execution error - never to change the periods, the measure, the comparison (prev
 quarter vs same quarter last year) or the layout.
 - A 'No results: ...' row, zero rows, or a figure with company_count 0 is a CORRECT final \
 answer: the data has no match. Output that SQL; do not retry other periods or tables.
-- For table choice: PAT / EBITDA -> combined_profit_and_loss_derived_quarterly or _yearly; \
-net sales / revenue -> combined_profit_and_loss_income_quarterly or _yearly; gross margin \
--> finance_metrics_financial_highlights_yearly; market cap, P/E, EV/EBITDA -> \
-historical_market_cap_pe_ev_ebitda.
 """
     + _DATASET_CHECKLIST
 )
