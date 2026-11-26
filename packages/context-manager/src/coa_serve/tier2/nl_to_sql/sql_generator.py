@@ -1263,6 +1263,7 @@ class SQLGenerator:
         dialect: str | None = None,
         feedback: str = "",
         governed_metric: str = "",
+        entities: str = "",  # cuedo-ext: entity-resolution prompt section
     ) -> tuple[str, float]:
         """Generate SQL from an ALREADY-ASSEMBLED schema context.
 
@@ -1280,6 +1281,7 @@ class SQLGenerator:
             feedback: Optional prior-attempt SQL + observation to revise from.
             governed_metric: Optional rendered governed-metric definition that
                 Tier-1 matched but declined.
+            entities: cuedo-ext — entity-resolution prompt section. Empty → none.
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -1295,6 +1297,7 @@ class SQLGenerator:
             dialect=dialect,
             feedback=feedback,
             governed_metric=governed_metric,
+            entities=entities,  # cuedo-ext
         )
         return sql, confidence
 

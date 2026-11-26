@@ -68,6 +68,7 @@ class SqlAuthoringTool:
         *,
         model_id: str | None = None,
         dialect: str | None = None,
+        entities: str = "",  # cuedo-ext: entity-resolution prompt section
     ):
         """Bind the tool to the SQL writer and the catalog holding the schemas.
 
@@ -77,11 +78,14 @@ class SqlAuthoringTool:
             model_id: Optional per-request LLM model override.
             dialect: Optional SQL dialect override; ``None`` keeps the
                 generator's configured default.
+            entities: cuedo-ext — entity filters resolved for this request
+                (extensions/entity-resolution); empty → none.
         """
         self._sql_generator = sql_generator
         self._catalog = catalog
         self._model_id = model_id
         self._dialect = dialect
+        self._entities = entities  # cuedo-ext
 
     async def generate_sql(
         self,
@@ -119,5 +123,6 @@ class SqlAuthoringTool:
             model_id=self._model_id,
             dialect=self._dialect,
             feedback=feedback,
+            entities=self._entities,  # cuedo-ext
         )
         return GeneratedSql(sql=sql, confidence=confidence, tables_used=names, missing_tables=missing)

@@ -178,7 +178,10 @@ class AgenticStrategy:
         # writes SQL over that cache, and the execution primitive is the ONLY way
         # a statement reaches an engine.
         catalog = TableCatalog(self._vector, self._sql_generator.llm, namespace=namespace, index=index_name)
-        authoring = SqlAuthoringTool(self._sql_generator, catalog, model_id=context.model_id)
+        # cuedo-ext: the same entity filters the standard path gives its writer.
+        authoring = SqlAuthoringTool(
+            self._sql_generator, catalog, model_id=context.model_id, entities=options.get("resolvedEntities", "")
+        )
         graph = (
             OntologyGraphTool(self._graph_client, catalog, namespace=namespace)
             if (self._graph_client is not None and _graph_traversal_enabled(options))
