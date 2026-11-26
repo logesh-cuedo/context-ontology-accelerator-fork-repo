@@ -226,21 +226,38 @@ def _picked_options(matcher: dict, query: str) -> list[EntityCandidate]:
     return _picked_answer(matcher, query.split(CLARIFICATION_PREFIX)[-1].strip())
 
 
-def _picked_answer(matcher: dict, answer: str) -> list[EntityCandidate]:
-    """The entities named by a clarification answer, or ``[]`` unless every part is exact.
+def _named_entities(matcher: dict, names: list[str]) -> list[EntityCandidate]:
+    """The entities these names identify, or ``[]`` unless EVERY name resolves to exactly one.
 
-    ``answer`` is the text after "User clarification:" — one option label, or
-    "all of: A; B". Labels carry the attribute we showed ("Bajaj Auto Ltd. (Automobile)"),
-    so each part is tried as written and again with that suffix removed.
+    Takes the names as a list, never as one joined string: a name is matched whole, so
+    whatever punctuation it contains is part of it rather than a separator this function
+    has to agree with its callers about. The all-or-nothing rule is what makes a caller
+    able to trust the result — a partial list would silently narrow the question.
+
+    Labels may carry the attribute we showed ("Bajaj Auto Ltd. (Automobile)"), so each
+    name is tried as written and again with that suffix removed.
     """
-    parts = [p.strip() for p in answer.removeprefix("all of:").split(";")] if answer.startswith("all of:") else [answer]
     picks: list[EntityCandidate] = []
-    for part in parts:
-        hits = exact(matcher, part) or exact(matcher, _TRAILING_LABEL.sub("", part))
+    for name in names:
+        if not (name := name.strip()):
+            continue
+        hits = exact(matcher, name) or exact(matcher, _TRAILING_LABEL.sub("", name))
         if len(hits) != 1:
             return []
         picks.append(_from_name_entry(hits[0]))
     return picks
+
+
+def _picked_answer(matcher: dict, answer: str) -> list[EntityCandidate]:
+    """The entities named by a clarification answer, or ``[]`` unless every part is exact.
+
+    ``answer`` is the text after "User clarification:" — one option label, or
+    "all of: A; B". This is the ONLY format with a ``;`` convention, because it is the
+    only one that arrives as prose the user produced; everything the system resolved
+    itself is passed as a list to ``_named_entities`` instead.
+    """
+    parts = answer.removeprefix("all of:").split(";") if answer.startswith("all of:") else [answer]
+    return _named_entities(matcher, parts)
 
 
 def _recent_turns(history: list[dict[str, str]] | None, matcher: dict | None = None) -> str:
@@ -365,7 +382,18 @@ def _carried_choice(matcher: dict, history: list[dict[str, str]] | None) -> list
         # "relaience", which no lookup over the catalog can find, so the carry came
         # back empty and the follow-up answered about every company in the namespace.
         if turn.get("role") == "assistant":
-            if named := _picked_answer(matcher, "; ".join(turn.get("resolved_entities") or [])):
+            # Passed as the list it already is. Joining it into one string and letting
+            # the clarification parser split it back meant the two sides had to agree on
+            # a separator convention they did not: the joined form carried no "all of:"
+            # marker, so the whole string was looked up as a single name, matched nothing
+            # and carried nobody — and a follow-up to any multi-company answer silently
+            # re-resolved from the earlier question's words instead ("top 3 pharma ..."
+            # scored pharma-named companies the answer never mentioned).
+            # Only an actual list. The turn is typed as string-valued, and a string
+            # here would be iterated character by character — each letter looked up as
+            # a company name.
+            stored = turn.get("resolved_entities")
+            if named := _named_entities(matcher, stored if isinstance(stored, list) else []):
                 return named
             continue
         if turn.get("role") != "user":
@@ -483,7 +511,7 @@ def _selection_prompt(
         "told you does say which: if the earlier questions below settle it, that is not "
         "ambiguous, so use their answer instead of asking it again. A question may name "
         "SEVERAL entities where only one of them is ambiguous — the status describes the "
-        "whole question, so report \"ambiguous\" and ALSO put every entity you did settle "
+        'whole question, so report "ambiguous" and ALSO put every entity you did settle '
         'in "chosen". Leaving them out drops them from the answer: a two-company question '
         "comes back about one company.\n"
         '- "not_found": the question names an entity that matches NO candidate.\n\n'
@@ -501,9 +529,9 @@ def _selection_prompt(
         '  "ambiguous_by_mention": {              // ambiguous: EVERY unclear name, each '
         "with its own candidates. Fill this whenever the question leaves more than one "
         "name unclear, so the user is asked about all of them at once instead of being "
-        'asked again on the next turn\n'
+        "asked again on the next turn\n"
         '    "bajaj": ["E1", "E2"], "reliance": ["E3", "E4"]\n'
-        '  },\n'
+        "  },\n"
         '  "refers_back": false                   // true if it refers to an earlier '
         'question\'s entity: on "no_entity" rather than asking about every entity, on '
         '"found" when it ALSO names one of its own (a comparison)\n'
@@ -673,15 +701,13 @@ def resolve_entities(
             tied[kind] = [c for c in ranked if c.score >= ranked[0].score * _TIE_RATIO][:_MAX_OPTIONS]
     tie_block = ""
     if tied:
-        lines_ = "\n".join(
-            f"- {kind}: " + ", ".join(c.name for c in cs) for kind, cs in tied.items()
-        )
+        lines_ = "\n".join(f"- {kind}: " + ", ".join(c.name for c in cs) for kind, cs in tied.items())
         tie_block = (
             "## Equally good name matches\n"
             "These candidates matched the question's wording EQUALLY well — the name as "
             "written does not distinguish them:\n"
             f"{lines_}\n"
-            'If the question names one of these and nothing in it decides which, that is '
+            "If the question names one of these and nothing in it decides which, that is "
             '"ambiguous" — list them in "ambiguous_candidates" and ask. Do not pick one '
             "because it is the largest or best known company; the user's words did not say "
             "so, and guessing returns another company's numbers as if they were theirs.\n\n"

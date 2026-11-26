@@ -33,10 +33,12 @@ from .config import EntityConfig, EntityConfigError, load_config
 from .index_builder import index_name
 from .lexical import matcher_from_catalog
 from .resolver import fallback_rules, resolve_entities, resolved_block, resume_clarification
+from .time_period import carried_period, split_periods, time_block
 
 logger = structlog.get_logger(__name__)
 
 STEP_ID = "t2.entity.resolve"
+TIME_STEP_ID = "t2.time.resolve"
 _CONFIG_TTL_S = 300.0
 _POINTER_TTL_S = 60.0
 
@@ -101,8 +103,8 @@ class EntityHook:
         Returns what serve does next, and the trace step to record (None when the
         feature is off for this namespace).
 
-        Time periods (FY25, Q3 FY25, ...) are not handled here: a ``time`` block in the
-        config is still accepted but ignored. Periods are left to the metrics.
+        Time periods (FY25, Q3 FY25, ...) are resolved here too when the config has a
+        ``time`` block, and a follow-up that names none carries the previous question's.
         """
         config = self.config_for(namespace)
         if config is None or not config.entity_types:
@@ -139,7 +141,29 @@ class EntityHook:
         }
         if resolution.needs_clarification:
             return Tier2Outcome(clarification=resolution.clarification), step
-        return Tier2Outcome(sql_context=resolved_block(resolution, config) or fallback_rules(config)), step
+        sections = [resolved_block(resolution, config) or fallback_rules(config)]
+        # The period, worked out here rather than left to the SQL writer. It is given the
+        # question alone, so "that year" has nothing to resolve against and it counts back
+        # from TODAY instead — FY26 for a conversation about FY25. The dates are arithmetic
+        # over the configured fiscal year-end, so computing them is exact where asking a
+        # model to is not.
+        # Fail open, like every other step here: the periods are an enrichment, and a
+        # fault in them must not cost the caller the entity filters resolved above.
+        try:
+            if config.time is not None:
+                periods, excluded = split_periods(query, config.time)
+                if not periods and not excluded:
+                    periods = carried_period(query, history, config.time)
+                if periods or excluded:
+                    # Into ``detail`` rather than through ``step``: it is the same dict,
+                    # and the one the type checker can see is a dict.
+                    detail["periods"] = [p.label for p in periods]
+                    if excluded:
+                        detail["excluded_periods"] = [p.label for p in excluded]
+                    sections.append(time_block(periods, config.time, excluded))
+        except Exception:
+            logger.warning("time_period_failed", namespace=namespace, exc_info=True)
+        return Tier2Outcome(sql_context="\n\n".join(s for s in sections if s)), step
 
     def config_for(self, namespace: str) -> EntityConfig | None:
         """The namespace's entity config, cached for 5 minutes. None means the feature is off."""

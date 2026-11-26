@@ -34,10 +34,26 @@ _MONTH_NUMBER = {
     "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10, "nov": 11, "november": 11,
     "dec": 12, "december": 12,
 }  # fmt: skip
+# How far back a period may be carried; matches the entity carry's history window.
+_CARRY_TURNS = 3
+# Words that turn the periods after them into ones to EXCLUDE ("... but not in FY25").
+# The block says "apply exactly these filters", so a period listed there is one the
+# answer is restricted TO. An excluded period emitted the same way inverts the
+# question — "grew in FY22-24 but NOT in FY25" came back filtered to FY25.
+_NEGATION = re.compile(
+    r"\b(?:but\s+not|not\s+in|except|excluding|other\s+than"
+    r"|did\s*n[o\']?t|have\s*n[o\']?t|has\s*n[o\']?t|were\s*n[o\']?t|was\s*n[o\']?t|failed\s+to)\b",
+    re.IGNORECASE,
+)
 _NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 _FISCAL = r"(?:fy|fiscal(?:\s+year)?)\s*['’-]?\s*(?:(\d{2}|\d{4})\s*[-/–]\s*)?(\d{2}|\d{4})"
 _PART_OF_YEAR = re.compile(r"\b(q[1-4]|h[12])\s*[-,]?\s*(?:of\s+)?" + _FISCAL + r"\b", re.IGNORECASE)
+# Months-to-date from the fiscal year start: 9MFY26 is Apr–Dec 2025, the first nine
+# months of FY26. Analysts write these constantly ("9MFY26", "3M FY26"), and without
+# them the span was dropped from the question entirely — a filter the user asked for
+# simply did not reach the SQL.
+_MONTHS_TO_DATE = re.compile(r"\b(3|6|9|12)\s*m\s*[-,]?\s*(?:of\s+)?" + _FISCAL + r"\b", re.IGNORECASE)
 _FISCAL_YEAR = re.compile(r"\b" + _FISCAL + r"\b", re.IGNORECASE)
 _CALENDAR_YEAR = re.compile(r"\b(?:cy|calendar\s+year)\s*['’-]?\s*(\d{2}|\d{4})\b", re.IGNORECASE)
 _MONTH_YEAR = re.compile(r"\b([a-z]{3,9})[\s\-'’]+(\d{2}|\d{4})\b", re.IGNORECASE)
@@ -50,6 +66,17 @@ _LAST_N = re.compile(
 _PREVIOUS_YEAR = re.compile(r"\b(?:previous|prior|preceding)\s+(?:fiscal\s+|financial\s+)?year\b", re.IGNORECASE)
 _LATEST_YEAR = re.compile(
     r"\b(?:latest|last|current|recent|most\s+recent|this)\s+(?:fiscal\s+|financial\s+|full\s+)?year\b", re.IGNORECASE
+)
+# A question asking across time names no period this module can pin, but it is NOT a
+# question without one: carrying the previous turn's single year into it filters a
+# multi-year answer down to that one year ("show the trend" after an FY25 question
+# charted a single point). These spans say "every period", so the carry stands down
+# and the SQL writer is left unconstrained, which is what the question asks for.
+_SPANS_TIME = re.compile(
+    r"\b(?:all\s+(?:years|periods|time|quarters)|every\s+(?:year|quarter|period)|full\s+history"
+    r"|over\s+the\s+years|year[\s-]on[\s-]year|yoy|q[\s-]?o[\s-]?q|cagr|trend|trends|history"
+    r"|growth\s+over|since\s+\d{2,4}|from\s+\d{4}|between\s+\d{4})\b",
+    re.IGNORECASE,
 )
 
 
@@ -115,15 +142,33 @@ def resolve_periods(query: str, spec: TimeSpec) -> list[Period]:
                             f"({MONTH_NAMES[first[1]]} {first[0]} – {MONTH_NAMES[last[1]]} {last[0]})"
                         )
                     period = Period(label, f"{col} BETWEEN {_yyyymm(*first)} AND {_yyyymm(*last)}")
+                elif pattern is _MONTHS_TO_DATE:
+                    months, fy = int(m.group(1)), _full_year(m.group(3))
+                    first = _add_months(fy, end_month, -11)  # the fiscal year's first month
+                    last = _add_months(*first, months - 1)
+                    period = Period(
+                        f"{months}M FY{fy % 100:02d} "
+                        f"({MONTH_NAMES[first[1]]} {first[0]} – {MONTH_NAMES[last[1]]} {last[0]})",
+                        f"{col} BETWEEN {_yyyymm(*first)} AND {_yyyymm(*last)}",
+                    )
                 elif pattern is _FISCAL_YEAR:
                     fy = _full_year(m.group(2))  # the calendar year it ends in ("FY 2024-25" ends in 2025)
                     if m.group(1):
                         begin = _full_year(m.group(1))
                         fy = fy if fy > begin else begin + 1
                     first = _add_months(fy, end_month, -11)
+                    # The END month alone, not the twelve months it covers. The column
+                    # marks where a period ENDS, so one row per period sits inside a
+                    # fiscal year's span: the quarterly rows of FY25 end 202406, 202409,
+                    # 202412 and 202503, and a BETWEEN over the whole year selected all
+                    # four alongside the yearly row — "net sales in FY25" against a
+                    # quarterly table summed the year roughly twice. A quarter's own
+                    # window is narrow enough that no other period ends inside it, which
+                    # is why only the year was wrong. The label still names the span,
+                    # because that is what the user asked for.
                     period = Period(
                         f"FY{fy % 100:02d} ({MONTH_NAMES[first[1]]} {first[0]} – {MONTH_NAMES[end_month]} {fy})",
-                        f"{col} BETWEEN {_yyyymm(*first)} AND {_yyyymm(fy, end_month)}",
+                        f"{col} = {_yyyymm(fy, end_month)}",
                     )
                 elif pattern is _CALENDAR_YEAR:
                     year = _full_year(m.group(1))
@@ -165,7 +210,7 @@ def resolve_periods(query: str, spec: TimeSpec) -> list[Period]:
         return found
 
     # "previous year" / "latest year" are used only when no exact period was named.
-    explicit = [_PART_OF_YEAR, _FISCAL_YEAR, _CALENDAR_YEAR, _MONTH_YEAR, _NUMERIC_MONTH, _LAST_N]
+    explicit = [_PART_OF_YEAR, _MONTHS_TO_DATE, _FISCAL_YEAR, _CALENDAR_YEAR, _MONTH_YEAR, _NUMERIC_MONTH, _LAST_N]
     periods = scan(explicit) or scan([_PREVIOUS_YEAR, _LATEST_YEAR])
     unique: dict[str, Period] = {}
     for p in periods:
@@ -173,17 +218,89 @@ def resolve_periods(query: str, spec: TimeSpec) -> list[Period]:
     return list(unique.values())
 
 
-def time_block(periods: list[Period], spec: TimeSpec) -> str:
-    """The SQL prompt text that lists the exact period filters to use."""
-    if not periods:
+def negated_from(query: str) -> int:
+    """Character offset where an exclusion starts ("but not in FY25"), or -1."""
+    m = _NEGATION.search(query)
+    return m.start() if m else -1
+
+
+def time_block(periods: list[Period], spec: TimeSpec, excluded: list[Period] | None = None) -> str:
+    """The SQL prompt text that lists the exact period filters to use.
+
+    ``excluded`` are periods the question ruled OUT. They are named separately rather
+    than dropped: the writer still needs their dates to test that the condition does
+    not hold there, and listing them beside the included ones would invert the question.
+    """
+    if not periods and not excluded:
         return ""
     lines = [
         "## Time period (authoritative)",
         f"{spec.column} holds each row's period END as YYYYMM; fiscal years end in "
-        f"{MONTH_NAMES[spec.fiscal_year_end_month]}. Apply exactly these filters — do not derive "
-        "fiscal-year boundaries yourself. Within a window, a yearly table has one row per company "
-        "per fiscal year; on a quarterly or monthly table, aggregate the rows in the window when the "
-        "question asks for an annual figure.",
+        f"{MONTH_NAMES[spec.fiscal_year_end_month]}. Apply exactly these filters as written — do not "
+        "widen them, and do not derive the period boundaries yourself. A filter naming one month "
+        "selects that period's single row; a range selects the periods ending inside it, which on a "
+        "quarterly table is several rows to aggregate when the question asks for one figure.",
     ]
     lines += [f"- {p.label} → {p.condition}" for p in periods]
+    if excluded:
+        lines.append(
+            "The question EXCLUDES the periods below: the condition must NOT hold in them. "
+            "Do not restrict the answer to these — test them and reject the rows that match."
+        )
+        lines += [f"- NOT {p.label} → {p.condition}" for p in excluded]
     return "\n".join(lines)
+
+
+def split_periods(query: str, spec: TimeSpec) -> tuple[list[Period], list[Period]]:
+    """The question's periods as (required, excluded), split at "but not" / "except".
+
+    Resolving the whole question at once cannot tell the two apart, so an excluded
+    period arrived as one to filter ON and the answer came back about the very period
+    the user ruled out.
+    """
+    cut = negated_from(query)
+    if cut < 0:
+        return resolve_periods(query, spec), []
+    required = resolve_periods(query[:cut], spec)
+    keys = {p.condition for p in required}
+    excluded = [p for p in resolve_periods(query[cut:], spec) if p.condition not in keys]
+    return required, excluded
+
+
+def carried_period(query: str, history: list[dict[str, str]] | None, spec: TimeSpec) -> list[Period]:
+    """The question's own periods, else the ones the last question named.
+
+    A follow-up says "that year" or "and the margin?" and names no period of its
+    own. Nothing downstream can recover the one it means: Tier 2 is given the
+    question alone, so the SQL writer resolves "that year" against TODAY and
+    answers about the current fiscal year instead of the one on screen — measured
+    as FY26 for a conversation about FY25.
+
+    Read from the earlier QUESTION, not from the answer: the period is in the
+    words the user wrote, and re-reading our own reply would carry back whatever
+    period the SQL happened to use. Only a question that names no period carries;
+    one that names its own is about that period, whatever came before.
+
+    A question that asks ACROSS time ("show the trend", "all years", "yoy") names no
+    single period either, but carrying one into it is worse than carrying nothing: it
+    cuts a multi-year answer down to the one year the previous question asked about.
+    Those stand down and leave the window to the SQL writer.
+    """
+    if own := resolve_periods(query, spec):
+        return own
+    if _SPANS_TIME.search(query):
+        return []
+    if _NEGATION.search(query):  # "but not in FY25" alone: the exclusion is the question
+        return []
+    asked = [t for t in (history or []) if t.get("role") == "user"]
+    # The same window the entity carry uses. Without it the walk runs to the start of
+    # the conversation and a period named twenty turns ago — long since moved on from —
+    # is applied to the question on screen.
+    for turn in reversed(asked[-_CARRY_TURNS:]):
+        # Only what the earlier question was ABOUT. Reading it whole carried its
+        # exclusions back as periods to filter on — "growth in FY24 but not FY25"
+        # made a follow-up answer about FY25, the year ruled out.
+        earlier, _ = split_periods(str(turn.get("content") or ""), spec)
+        if earlier:
+            return earlier
+    return []
