@@ -44,6 +44,10 @@ CLARIFICATION_PREFIX = "\nUser clarification:"  # the user's answer is added aft
 
 _MAX_OPTIONS = 6
 _NAME_MATCHES_PER_KIND = 8  # extra name matches per kind, on top of the search results
+# Most already-resolved entities offered back as P labels. Ten covers a "top 10"
+# answer whose every company a follow-up may then narrow; the cap falls on the
+# oldest turn first, so the subject the user is on keeps its labels.
+_MAX_PRIOR = 10
 # How close a second name match must score to the best one to count as "equally
 # good". 0.95 keeps it to genuine ties — several entities sharing the one word the
 # user actually wrote — rather than merely close runners-up.
@@ -55,11 +59,6 @@ _STATUSES = {"found", "no_entity", "not_found", "ambiguous"}
 _HISTORY_TURNS = 3
 _HISTORY_CHARS = 300  # per turn, so one long pasted question cannot crowd out the prompt
 _OPTION_LINE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
-_WORDS = re.compile(r"[a-z0-9]+")  # a name's words, for matching it inside a question
-_WORDS_INDEX_KEY = "_by_words"  # where _words_index caches itself on the matcher
-# A carried-back name must be at least this many words. One word ("reliance", "tata")
-# names a house rather than a company and is rarely the whole of what was meant.
-_CARRY_MIN_WORDS = 2
 _TRAILING_LABEL = re.compile(r"\s*\([^()]*\)\s*$")  # removes "(Automobile)" from "Bajaj Auto Ltd. (Automobile)"
 
 
@@ -72,6 +71,11 @@ class EntityCandidate:
     name: str
     attrs: tuple[tuple[str, str], ...] = ()
     score: float = 0.0
+
+    @property
+    def ident(self) -> tuple[str, str]:
+        """What makes it the same entity, for dedupe."""
+        return (self.kind, self.key)
 
     @property
     def label(self) -> str:
@@ -102,11 +106,6 @@ class EntityResolution:
 
 
 # ── text added to the SQL prompt ─────────────────────────────────────────
-
-
-def like_literal(name: str) -> str:
-    """Make a name safe for a LIKE pattern: lower case, double any quote, drop ``%``."""
-    return name.lower().replace("'", "''").replace("%", "")
 
 
 def _quote(value: str) -> str:
@@ -260,166 +259,96 @@ def _picked_answer(matcher: dict, answer: str) -> list[EntityCandidate]:
     return _named_entities(matcher, parts)
 
 
-def _recent_turns(history: list[dict[str, str]] | None, matcher: dict | None = None) -> str:
-    """The user's last few questions, oldest first, for a follow-up that refers back.
+def _conversation(matcher: dict | None, history: list[dict[str, str]] | None) -> tuple[str, list[EntityCandidate]]:
+    """The conversation so far as (transcript, prior entities), newest turn last.
 
-    User turns only: an assistant reply restates the names it answered about, which
-    pulls the resolver towards its own previous answer rather than the question.
+    Each question is rendered with the entities that turn resolved to, labelled P1,
+    P2, …, so the model can see WHICH turn each label belongs to:
+
+        1. revenue of tcs and infosys
+           → resolved: P1 (Tata Consultancy Services Ltd.), P2 (Infosys Ltd.)
+        2. revenue of pharmaceuticals sector     [most recent]
+           → resolved: P3 (Pharmaceuticals)
+
+    Pairing matters when the topic changes. A flat list of entities cannot show that
+    the companies came from an abandoned question and the sector from the current one,
+    so "roce for those" was as likely to be answered with the stale companies as with
+    the sector the user had moved on to. The turn each label sits under is what makes
+    that judgement possible.
+
+    Questions come from the user turns and entities from the assistant turn that
+    answered them: ``resolved_entities`` holds what resolution settled on rather than
+    the words the question was asked in, which is how a misspelled name ("relaience")
+    survives into the next turn. Each name is looked up in the catalog, so a P label
+    resolves to that exact row — two entities can differ only by a suffix ("Tata Steel
+    Ltd." and "Tata Steel Ltd. - (TATASTEELPP)"), and re-picking such a name by eye
+    returns the twin the user already rejected.
     """
     if not history:
-        return ""
-    asked = [str(t.get("content") or "").strip() for t in history if t.get("role") == "user"]
-    # A resumed turn is stored as the original question plus the answer, so the question
-    # it was built from is already in the list. Keep the resumed one — it carries the
-    # name the user chose — and drop the bare copy, which only repeats the ambiguity.
-    resumed = {q.split(CLARIFICATION_PREFIX)[0].strip() for q in asked if CLARIFICATION_PREFIX in q}
-    kept = [q for q in asked if q and q not in resumed]
-
-    def rendered(q: str) -> str:
-        # A resumed turn still carries the ambiguous words the user was asked about
-        # ("tata steel"), next to the answer that settled them. Left as written, those
-        # words read as a question to resolve again, and the same clarification comes
-        # back. Show the answer as the settled fact it is, and drop the question.
-        question, sep, answer = q.partition(CLARIFICATION_PREFIX)
-        if sep and (answer := answer.strip()):
-            asked_about = question.strip()[:_HISTORY_CHARS]
-            # Name the entity the answer resolves to, not the option text the user
-            # clicked: where candidates differ only by a suffix, that text reads as a
-            # match for either of them, and the rejected one comes back.
-            picked = _picked_answer(matcher, answer) if matcher is not None else []
-            settled = ", ".join(c.name for c in picked) or answer[:_HISTORY_CHARS]
-            return f"- {asked_about}\n  (the user was asked which entity, and answered: {settled})"
-        return f"- {q[:_HISTORY_CHARS]}"
-
-    return "\n".join(rendered(q) for q in kept[-_HISTORY_TURNS:])
-
-
-def _pinned_choice(matcher: dict, history: list[dict[str, str]] | None) -> list[EntityCandidate]:
-    """The entities the user last chose by answering a clarification, or ``[]``.
-
-    Read back by the same exact-name lookup that resolved the answer, so a follow-up
-    reuses the very row the user picked. Asking the model again instead does not work:
-    the candidates behind a clarification differ only by a suffix, so it re-picks the
-    rejected twin or offers both — measured at 0/5 conversations kept on the right row.
-    """
-    for turn in reversed(history or []):
-        if turn.get("role") != "user":
-            continue
-        _, sep, answer = str(turn.get("content") or "").partition(CLARIFICATION_PREFIX)
-        if sep and (picked := _picked_answer(matcher, answer.strip())):
-            return picked
-    return []
-
-
-def _words_index(matcher: dict) -> tuple[dict[str, tuple], int]:
-    """Catalog names keyed by their words alone, with the longest name's word count.
-
-    The stored keys keep their punctuation ("marg ltd."), which a question rarely
-    reproduces exactly, so they are re-keyed on words alone ("marg ltd").
-    Cached on the matcher itself, which is built once per index version and dropped with
-    it, so the cache cannot outlive or disagree with the names it was built from.
-    """
-    if (cached := matcher.get(_WORDS_INDEX_KEY)) is not None:
-        return cached
-    whole: dict[str, list] = {}
-    prefixes: dict[str, list] = {}
-    for name, entries in matcher["by_name"].items():
-        words = _WORDS.findall(name)
-        if not words:
-            continue
-        whole.setdefault(" ".join(words), []).extend(entries)
-        # Every leading run of the name as well: people write "reliance industries",
-        # never "Reliance Industries Ltd.", so indexing the full name alone meant a
-        # comparison almost never found what it referred back to. A prefix may name
-        # several companies; only one that identifies exactly one is kept.
-        for n in range(_CARRY_MIN_WORDS, len(words)):
-            prefixes.setdefault(" ".join(words[:n]), []).extend(entries)
-    # A name written out in full wins over being the start of a longer one: "Tata Steel
-    # Ltd." IS one company, though it also begins "Tata Steel Ltd. - (TATASTEELPP)".
-    index = {k: v for k, v in prefixes.items() if k not in whole}
-    index.update(whole)
-    one = {
-        k: tuple(v)
-        for k, v in index.items()
-        if len({(e.kind, e.key) for e in v}) == 1 and len(k.split()) >= _CARRY_MIN_WORDS
-    }
-    built = (one, max((len(k.split()) for k in one), default=0))
-    matcher[_WORDS_INDEX_KEY] = built
-    return built
-
-
-def _names_in(matcher: dict, text: str) -> list[tuple[str, tuple]]:
-    """The catalog names written out in ``text``, as (name, entries).
-
-    Matched on whole words, so punctuation and spacing differ freely ("Marg Ltd."
-    matches "marg ltd pat") while "IOL" is not found inside "iolite". Every run of
-    words in the question is looked up directly: testing all 8,334 names against the
-    question instead costs about half a second on each comparison.
-    """
-    index, longest = _words_index(matcher)
-    words = _WORDS.findall(text.lower())
-    found: dict[str, tuple] = {}
-    for i in range(len(words)):
-        for j in range(i + 1, min(i + longest, len(words)) + 1):
-            if entries := index.get(key := " ".join(words[i:j])):
-                found[key] = tuple(entries)
-    return list(found.items())
-
-
-def _carried_choice(matcher: dict, history: list[dict[str, str]] | None) -> list[EntityCandidate]:
-    """The entity an earlier question named outright, for a comparison to refer back to.
-
-    Falls back to this only where no clarification settled the matter (``_pinned_choice``
-    is tried first). A full name must appear verbatim in the earlier question, so the
-    words are read as a name only when they ARE one. Scoring the old question with the
-    fuzzy matcher instead would carry back whatever it resembled — "and the margin"
-    scores Marg Ltd., "roce for same" scores Sameera Agro — which is the lookalike
-    misread, arriving a turn late and attached to a question that looks answered.
-    """
-    for turn in reversed(history or []):
-        # The answer turn records the names resolution settled on. Reading those is
-        # the only way a misspelled name survives: the question beside it says
-        # "relaience", which no lookup over the catalog can find, so the carry came
-        # back empty and the follow-up answered about every company in the namespace.
-        if turn.get("role") == "assistant":
-            # Passed as the list it already is. Joining it into one string and letting
-            # the clarification parser split it back meant the two sides had to agree on
-            # a separator convention they did not: the joined form carried no "all of:"
-            # marker, so the whole string was looked up as a single name, matched nothing
-            # and carried nobody — and a follow-up to any multi-company answer silently
-            # re-resolved from the earlier question's words instead ("top 3 pharma ..."
-            # scored pharma-named companies the answer never mentioned).
-            # Only an actual list. The turn is typed as string-valued, and a string
-            # here would be iterated character by character — each letter looked up as
-            # a company name.
+        return "", []
+    # Walk forwards, pairing each question with the entities of the reply that follows.
+    turns: list[tuple[str, list[str]]] = []
+    for turn in history:
+        role, content = turn.get("role"), str(turn.get("content") or "").strip()
+        if role == "user":
+            question, sep, answer = content.partition(CLARIFICATION_PREFIX)
+            asked = question.strip()[:_HISTORY_CHARS]
+            if not asked:
+                continue
+            # A resumed turn carries both the ambiguous words and the answer that
+            # settled them. Left as written the words read as a question to resolve
+            # again, and the same clarification comes back.
+            if sep and (reply := answer.strip()):
+                asked += f" (asked which entity; the user answered: {reply[:_HISTORY_CHARS]})"
+            turns.append((asked, []))
+        elif role == "assistant" and turns:
+            # Only an actual list. The turn is typed as string-valued, and a string here
+            # would be iterated character by character — each letter looked up as a
+            # company name.
             stored = turn.get("resolved_entities")
-            if named := _named_entities(matcher, stored if isinstance(stored, list) else []):
-                return named
-            continue
-        if turn.get("role") != "user":
-            continue
-        content = str(turn.get("content") or "")
-        # A clarified turn is settled by the answer the user gave, not by the words they
-        # were asked about: "tata steel" there is the ambiguous mention, and reading it
-        # as a name would carry back the twin they were choosing between.
-        question, sep, answer = content.partition(CLARIFICATION_PREFIX)
-        if sep:
-            if picked := _picked_answer(matcher, answer.strip()):
-                return picked
-            content = question
-        found = _names_in(matcher, content)
-        # One name inside another is one mention, not two: "Tata Steel Ltd." is a
-        # substring of "Tata Steel Ltd. - (TATASTEELPP)", so a question about the
-        # longer one contains both. Keep only names no other match contains — the
-        # words the user actually wrote — or the twin that caused this bug carries
-        # nothing at all.
-        names = [n for n, _ in found]
-        hits = [e for name, entries in found if not any(name != o and name in o for o in names) for e in entries]
-        # One name only: two make the referent ambiguous, and guessing which the user
-        # meant is the twin-picking mistake in another form.
-        if len({(e.kind, e.key) for e in hits}) == 1:
-            return [_from_name_entry(hits[0])]
-    return []
+            if isinstance(stored, list):
+                turns[-1][1].extend(str(n) for n in stored)
+
+    turns = turns[-_HISTORY_TURNS:]
+
+    # Resolve each turn's names, newest turn first, so the cap falls on the subject the
+    # user has moved on from rather than the one they are on: a first question naming
+    # six companies otherwise filled every slot and the sector the follow-up was
+    # actually about got no label at all.
+    resolved: dict[int, list[EntityCandidate]] = {}
+    allowed: set[tuple[str, str]] = set()
+    for position in reversed(range(len(turns))):
+        kept = []
+        for name in turns[position][1]:
+            # Exactly one match only: a name identifying several rows cannot be carried
+            # without guessing which, and guessing is the twin mistake.
+            hits = exact(matcher, name) if matcher is not None else []
+            if len(hits) != 1:
+                continue
+            candidate = _from_name_entry(hits[0])
+            if candidate.ident not in allowed:
+                if len(allowed) >= _MAX_PRIOR:
+                    continue
+                allowed.add(candidate.ident)
+            kept.append(candidate)
+        resolved[position] = kept
+
+    # Number in reading order, so P1 is the first label the transcript shows.
+    prior: list[EntityCandidate] = []
+    numbers: dict[tuple[str, str], int] = {}
+    for position in sorted(resolved):
+        for candidate in resolved[position]:
+            if candidate.ident not in numbers:
+                prior.append(candidate)
+                numbers[candidate.ident] = len(prior)
+
+    lines = []
+    for position, (question, _) in enumerate(turns):
+        recency = "     [most recent question]" if position == len(turns) - 1 else ""
+        lines.append(f"{position + 1}. {question}{recency}")
+        if labels := [f"P{numbers[c.ident]} ({c.name})" for c in resolved[position]]:
+            lines.append(f"   → resolved: {', '.join(labels)}")
+    return "\n".join(lines), prior
 
 
 def _selection_prompt(
@@ -428,6 +357,7 @@ def _selection_prompt(
     kinds: list[KindInfo],
     history_block: str = "",
     tie_block: str = "",
+    prior: list[EntityCandidate] | None = None,
 ) -> str:
     names = ", ".join(k.type for k in kinds)
     groups = [k.type for k in kinds if k.is_group]
@@ -435,6 +365,15 @@ def _selection_prompt(
         f"E{i}. [{c.kind}] {c.name}" + (" | " + ", ".join(f"{a}: {v}" for a, v in c.attrs) if c.attrs else "")
         for i, c in enumerate(candidates, start=1)
     )
+    prior_section = ""
+    if prior:
+        prior_lines = "\n".join(f"P{i}. [{c.kind}] {c.name}" for i, c in enumerate(prior, start=1))
+        prior_section = (
+            "## Entities this conversation already settled\n"
+            "Options you may choose, exactly like the candidates below. The conversation "
+            "above shows which question each one came from.\n"
+            f"{prior_lines}\n\n"
+        )
     group_rules = ""
     if groups:
         g = groups[0]
@@ -461,32 +400,52 @@ def _selection_prompt(
         "'all of: A; B; C' means choose every one of those.\n\n"
     )
     carry_over_rule = ""
-    if history_block:
+    if prior:
         carry_over_rule = (
             "## Follow-up to an earlier question\n"
-            "The earlier questions are context, NOT the question to answer.\n"
-            "- A question that names an entity itself is about that entity. The earlier "
-            "questions change nothing — never answer it with an entity from them.\n"
-            "- Judge ONLY the words of the question itself. A question that names no "
-            'entity in its own words is "no_entity", even where the earlier questions '
-            "make plain who it is about — carrying that over is handled for you, and "
-            "answering from the earlier questions instead gets the wrong one.\n"
-            "- So a question that refers back instead of naming — a word standing in for "
-            'an entity, or a bare metric or period on its own — is "no_entity" with '
-            '"refers_back": true. Do not copy a name out of the earlier questions into '
-            "the mention, and do not ask which entity it is.\n"
-            '- A question that asks about every entity ("top 10 by revenue") is also '
-            '"no_entity", but with "refers_back": false — it refers back to nobody.\n'
-            '- A question may do BOTH: name one entity and refer back to another ("compare '
-            'it with X", "versus X", "and X too"). That is "found" with ONLY the entity it '
-            'names in "chosen", plus "refers_back": true. The one it refers back to is '
-            "added for you — never copy that name out of the earlier questions.\n"
+            "A question need not name its entity: it can point back at one this "
+            "conversation already settled. Answer those with the P label, which IS that "
+            "entity — never re-pick it from the E candidates, where the same name plus a "
+            "suffix or code is a DIFFERENT entity with different data.\n"
+            "- Points back without naming anybody (a word standing in for an entity, or "
+            'a bare metric or period on its own: "and its roce?", "same for FY24") → '
+            '"found" with the P label(s) it means.\n'
+            '- Narrows what came before ("just the first two", "only the Tata ones", '
+            '"drop Wipro") → "found" with ONLY the P labels that survive. Choose the '
+            "subset the question asks for, not every P label.\n"
+            '- Names an entity of its own AND points back ("compare it with X", "versus '
+            'X", "and X too") → "found" with both: the E candidate it names and the P '
+            "label it refers to.\n"
+            "- Names its own entity and points back at nobody → ignore the P labels "
+            "entirely. The earlier questions change nothing.\n"
+            '- Asks about every entity ("top 10 by revenue") → "no_entity". It refers to '
+            "nobody, so choose no P label.\n"
+            "\n"
+            "### The conversation can change topic\n"
+            "A P label belongs to the question it is listed under, and those questions "
+            "are not all about the same thing: the user can drop one subject and take up "
+            "another. So choose by WHICH question the follow-up continues, not by what is "
+            "available.\n"
+            "- Default to the most recent question's entities. That is the subject the "
+            "user is on, and a bare follow-up continues it.\n"
+            "- An earlier question's entities are for a follow-up that reaches back to "
+            'that question on purpose ("and the two companies from before", "compare it '
+            'with the first one"). A follow-up that simply continues does NOT revive '
+            "them.\n"
+            "- Never mix entities from a question the user has moved on from with the "
+            "current one. Filtering on both returns rows that satisfy neither — a sector "
+            "AND two companies outside it is an empty answer.\n"
+            "- Different kinds are a strong sign of a topic change: where the most recent "
+            f"question settled a {'/'.join(k.type for k in kinds if k.is_group) or 'group'} "
+            "and an earlier one settled companies, a bare follow-up means the recent one "
+            "alone, unless the question names the earlier subject again.\n"
         )
-    history_section = f"## Earlier questions in this conversation\n{history_block}\n\n" if history_block else ""
+    history_section = f"## This conversation so far\n{history_block}\n\n" if history_block else ""
     return (
         f"You resolve which named entities ({names}) a data question refers to.\n"
         "A search over the database's entity tables (by meaning and by name) returned the "
-        "candidates below. Choose ONLY from these candidates — never invent one.\n"
+        "candidates below. Choose ONLY from the labels given to you — an E candidate, or a "
+        "P entity this conversation already settled — and never invent one.\n"
         "The search is fuzzy, so most candidates are wrong: it matches on shared letters "
         "and will offer an entity whose name merely resembles an ordinary word of the "
         "question. A candidate counts only where the question is genuinely naming it — "
@@ -494,6 +453,7 @@ def _selection_prompt(
         "and no candidate they pulled in may be chosen.\n\n"
         f"{history_section}"
         f"## Question\n<question>{query}</question>\n\n"
+        f"{prior_section}"
         f"## Candidates\n{lines}\n\n"
         f"{tie_block}"
         "## Decide one status\n"
@@ -521,9 +481,10 @@ def _selection_prompt(
         "## Output — one JSON object, nothing else\n"
         "{\n"
         '  "status": "found" | "no_entity" | "ambiguous" | "not_found",\n'
-        '  "chosen": ["E1"],                      // found: the chosen candidate labels; on '
-        '"ambiguous" ALSO list every entity the question names that you DID settle, so the '
-        "user is not asked about those again\n"
+        '  "chosen": ["E1", "P1"],                // found: the chosen labels — an E '
+        "candidate the question names, a P entity it points back at, or both; on "
+        '"ambiguous" ALSO list every entity the question names that you DID settle, so '
+        "the user is not asked about those again\n"
         '  "mention": "bajaj",                    // ambiguous/not_found: the name as written\n'
         '  "ambiguous_candidates": ["E1", "E2"],  // ambiguous: the candidates it could be\n'
         '  "ambiguous_by_mention": {              // ambiguous: EVERY unclear name, each '
@@ -532,9 +493,6 @@ def _selection_prompt(
         "asked again on the next turn\n"
         '    "bajaj": ["E1", "E2"], "reliance": ["E3", "E4"]\n'
         "  },\n"
-        '  "refers_back": false                   // true if it refers to an earlier '
-        'question\'s entity: on "no_entity" rather than asking about every entity, on '
-        '"found" when it ALSO names one of its own (a comparison)\n'
         "}"
     )
 
@@ -569,7 +527,10 @@ def resolve_entities(
     ``clients`` is a ``clients.Clients`` (blocking calls): run this in a worker thread.
     """
     kinds = config.kind_infos()
-    history_block = _recent_turns(history, matcher)
+    # The conversation so far, and the entities it settled, numbered together: each
+    # question is shown with the P labels it resolved to, so a follow-up is answered
+    # from the question it continues rather than from whatever is on the list.
+    history_block, prior = _conversation(matcher, history)
 
     # The user has just picked from the options we offered, and every part names exactly
     # one entity: the answer is settled. Searching and asking Bedrock again can only
@@ -579,30 +540,21 @@ def resolve_entities(
         # The question may have named other companies besides the ambiguous one we asked
         # about ("tata steel and jsw steel ..."). Only the ambiguous name was put to the
         # user, so returning their pick alone answered a two-company question with one.
-        # Any name in the question that identifies exactly one entity is added back; an
-        # ambiguous name is absent from that index, which is why it was asked about.
-        keys = {(c.kind, c.key) for c in picked}
+        # Scoring the original question adds those back. Only a clear winner is taken: a
+        # run-away top score with nothing close behind it is one entity the question
+        # names outright, whereas several near-equal scores are the ambiguity that was
+        # asked about — re-adding those would answer with the very companies the user
+        # just declined.
+        keys = {c.ident for c in picked}
         original = query.split(CLARIFICATION_PREFIX)[0]
-        for _, entries in _names_in(matcher, original):
-            entry = entries[0]
-            if (entry.kind, entry.key) not in keys:
-                keys.add((entry.kind, entry.key))
-                picked.append(_from_name_entry(entry))
-        # ``_names_in`` finds only names written out in full, so a company the user
-        # named by its acronym ("tcs") was not added back and the answer came out
-        # about the clarified company alone. Scoring the original question finds it
-        # the same way the main path does. Only a clear winner is taken: a run-away
-        # top score with nothing close behind it is one entity the question names
-        # outright, whereas several near-equal scores are the ambiguity that was
-        # asked about — and re-adding those would answer with the very companies
-        # the user just declined.
         scored = sorted(match(matcher, original, {k.type: _MAX_OPTIONS for k in kinds}), key=lambda t: -t[1])
         for pos, (entry, score) in enumerate(scored):
             runner_up = scored[pos + 1][1] if pos + 1 < len(scored) else 0.0
-            if (entry.kind, entry.key) in keys or runner_up >= score * _TIE_RATIO:
+            candidate = _from_name_entry(entry)
+            if candidate.ident in keys or runner_up >= score * _TIE_RATIO:
                 continue
-            keys.add((entry.kind, entry.key))
-            picked.append(_from_name_entry(entry))
+            keys.add(candidate.ident)
+            picked.append(candidate)
         logger.info("entity_clarification_picked", namespace=namespace, entities=[c.name for c in picked])
         return EntityResolution(status="found", chosen=picked)
 
@@ -716,7 +668,7 @@ def resolve_entities(
     # 2. Ask Bedrock to choose. Its reply should contain one JSON object.
     try:
         text = clients.converse(
-            _selection_prompt(query, candidates, kinds, history_block, tie_block),
+            _selection_prompt(query, candidates, kinds, history_block, tie_block, prior),
             max_tokens=1500,
             temperature=0.0,
             model_id=model_id,
@@ -732,58 +684,39 @@ def resolve_entities(
     if not isinstance(choice, dict) or choice.get("status") not in _STATUSES:
         return EntityResolution(status="skipped", reason="unusable selection reply")
 
-    # 3. Read the choice. Only labels that exist in our list (E1, E2, ...) are kept.
-    by_label = {f"E{i}": c for i, c in enumerate(candidates, start=1)}
+    # 3. Read the choice. Only labels we offered are kept — E for a candidate from this
+    #    question, P for an entity this conversation already settled. A P label resolves
+    #    to the row that turn ended on, so a follow-up cannot drift onto a same-named
+    #    twin; nothing else is accepted, so an invented label is simply dropped.
+    by_label: dict[str, EntityCandidate] = {f"E{i}": c for i, c in enumerate(candidates, start=1)}
+    by_label.update({f"P{i}": c for i, c in enumerate(prior, start=1)})
 
     def chosen_from(labels: object) -> list[EntityCandidate]:
-        found = [by_label.get(str(label).strip().upper()) for label in (labels if isinstance(labels, list) else [])]
-        return list(dict.fromkeys(c for c in found if c is not None))  # unknown labels dropped, no repeats
+        """The entities these labels name, in order, each once. Unknown labels are dropped.
+
+        Deduped on ``ident``, not on the candidate itself: one entity can be offered
+        both as an E candidate and as a P label, and those two instances carry
+        different scores — so they compare unequal, and a question that names an
+        entity it also points back at ("sun pharma roce" after a five-company answer)
+        listed it twice, right through to two identical filters in the SQL prompt.
+        """
+        picked: dict[tuple[str, str], EntityCandidate] = {}
+        for label in labels if isinstance(labels, list) else []:
+            if (c := by_label.get(str(label).strip().upper())) is not None:
+                picked.setdefault(c.ident, c)
+        return list(picked.values())
 
     status = choice["status"]
     # If the reply did not say which name, use the user's own words.
     mention = str(choice.get("mention") or "").strip() or query.split(CLARIFICATION_PREFIX)[-1].strip()[:60]
     mention = mention or "that name"
 
-    # A follow-up names nobody of its own, so its entity is the one the user last chose
-    # — already settled, not a judgement to make again. Resolving it afresh instead does
-    # not work: the candidates behind a clarification differ only by a suffix, so a
-    # second pass re-picks the rejected twin, returns both, or latches onto a lookalike
-    # the fuzzy search pulled in. Measured at 0/5 conversations kept on the chosen row.
-    #
-    # Only a question that names nobody is carried; one that names an entity is that
-    # entity's question, whatever came before. Both readings are the model's, because a
-    # name match on the question alone cannot tell them apart — it scores a follow-up's
-    # ordinary words against a real company above some questions that do name one.
-    if (
-        matcher is not None
-        and status == "no_entity"
-        and choice.get("refers_back") is True
-        # A clarification settles it where there was one; otherwise the earlier turn
-        # does, read from what it RESOLVED to rather than from the words it was asked
-        # in. Only the clarified reading was consulted here, so a question answered
-        # without asking — including one whose name was misspelled — left the follow-up
-        # with nobody to carry, and it answered about every company in the namespace.
-        and (pinned := _pinned_choice(matcher, history) or _carried_choice(matcher, history))
-    ):
-        logger.info("entity_pinned", namespace=namespace, status=status, entities=[c.name for c in pinned])
-        return EntityResolution(status="found", chosen=pinned)
-
     resolution = EntityResolution(status="no_entity")
     if status == "found":
+        # Both sides of a comparison ("compare it with X") arrive in one list: the E
+        # candidate the question names and the P entity it points back at. Ordered as
+        # the model gave them, so "compare it with X" reads P first, X second.
         chosen = chosen_from(choice.get("chosen"))
-        # A comparison names one entity and refers back to another ("compare it with X").
-        # The named one is the model's; the other is the one already settled, so it is
-        # carried the same way a bare follow-up carries it. Added, never substituted —
-        # dropping it answered a two-company question with one company.
-        if matcher is not None and chosen and choice.get("refers_back") is True:
-            keys = {(c.kind, c.key) for c in chosen}
-            # Whichever came last: a clarification the user answered, or a question that
-            # named its entity outright. Preferring the clarification regardless carried
-            # it back long after the user had moved on to another company.
-            earlier = _carried_choice(matcher, history)
-            if carried := [c for c in earlier if (c.kind, c.key) not in keys]:
-                chosen = [*carried, *chosen]
-                logger.info("entity_carried_back", namespace=namespace, entities=[c.name for c in chosen])
         resolution = EntityResolution(status="found", chosen=chosen)
         if not chosen:
             status = "not_found"  # "found" but no valid label: ask the user instead of guessing
