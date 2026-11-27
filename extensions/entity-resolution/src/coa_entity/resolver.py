@@ -537,24 +537,22 @@ def resolve_entities(
     # re-derive it — or contradict the person who chose. A typed answer ("bajaj auto")
     # matches no name exactly, so it still goes the long way round and the model decides.
     if matcher is not None and CLARIFICATION_PREFIX in query and (picked := _picked_options(matcher, query)):
-        # The question may have named other companies besides the ambiguous one we asked
-        # about ("tata steel and jsw steel ..."). Only the ambiguous name was put to the
-        # user, so returning their pick alone answered a two-company question with one.
-        # Scoring the original question adds those back. Only a clear winner is taken: a
-        # run-away top score with nothing close behind it is one entity the question
-        # names outright, whereas several near-equal scores are the ambiguity that was
-        # asked about — re-adding those would answer with the very companies the user
-        # just declined.
+        # The pick IS the answer: it goes straight on, with nothing added by guesswork.
+        #
+        # The question may have named other entities besides the ambiguous one we asked
+        # about ("tata steel and jsw steel ..."), and only the ambiguous name was put to
+        # the user. Those come from the turn that asked: the model reported them as
+        # settled, we showed them back ("keeping Tata Steel Ltd."), and they are in that
+        # turn's resolved entities. Re-reading the original question with the name
+        # matcher instead guessed at what it already knew, and the guess was wrong: it
+        # scored the question's ordinary words against the catalog, so "revenue of
+        # reliance" answered with Reliance Industries — the pick — plus Reliance
+        # Communications, Reliance Home Finance and a stock index whose name contains
+        # "revenue". A tie test was meant to hold those back and could not: identical
+        # scores were compared pairwise, so the LAST of a tied run had nothing after it
+        # to tie with and passed as a clear winner.
         keys = {c.ident for c in picked}
-        original = query.split(CLARIFICATION_PREFIX)[0]
-        scored = sorted(match(matcher, original, {k.type: _MAX_OPTIONS for k in kinds}), key=lambda t: -t[1])
-        for pos, (entry, score) in enumerate(scored):
-            runner_up = scored[pos + 1][1] if pos + 1 < len(scored) else 0.0
-            candidate = _from_name_entry(entry)
-            if candidate.ident in keys or runner_up >= score * _TIE_RATIO:
-                continue
-            keys.add(candidate.ident)
-            picked.append(candidate)
+        picked += [c for c in prior if c.ident not in keys]
         logger.info("entity_clarification_picked", namespace=namespace, entities=[c.name for c in picked])
         return EntityResolution(status="found", chosen=picked)
 
