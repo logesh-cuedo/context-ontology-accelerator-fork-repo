@@ -90,6 +90,21 @@ def _resolved_entities(metadata: dict) -> list[str]:
     return []
 
 
+def _answered_columns(metadata: dict) -> list[str]:
+    """The column headings this turn's answer came back with.
+
+    Read from the first result row, which is where the shape of an answer actually
+    shows: a turn that reported ROCE has a "Roce" column whatever its SQL looked like.
+    Carried so the next question can be told what has already been answered — the SQL
+    writer sees the question alone, so "and its roce?" after a net-sales question read
+    as a fresh request and returned net sales a second time.
+    """
+    rows = metadata.get("resultRows") or metadata.get("result_rows")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        return [str(c) for c in rows[0]][:12]
+    return []
+
+
 def _parse_assistant_content(raw_text: str) -> tuple[str, dict | None]:
     """Parse assistant message content, detecting JSON envelope.
 
@@ -294,6 +309,11 @@ class SessionManager:
                         # carrying just those keeps the turn readable without
                         # restoring the whole envelope.
                         entry["resolved_entities"] = resolved
+                    # Independently of the entities: a turn can answer with columns
+                    # while naming nobody ("top 10 by revenue"), and the next question
+                    # still must not repeat it.
+                    if metadata and not include_metadata and (cols := _answered_columns(metadata)):
+                        entry["answered_columns"] = cols
                     history.append(entry)
                 else:
                     history.append({"role": role, "content": text})

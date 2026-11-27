@@ -91,6 +91,11 @@ class EntityResolution:
     chosen: list[EntityCandidate] = field(default_factory=list)
     clarification: str = ""
     reason: str = ""
+    # True when the question leaned on an earlier turn for an entity rather than
+    # naming it — the model answered with a P label. The SQL writer is given the
+    # question alone, so it cannot tell "and its roce?" from a first question, and
+    # answered the earlier one again; this is what tells it otherwise.
+    follows_up: bool = False
 
     @property
     def needs_clarification(self) -> bool:
@@ -644,11 +649,24 @@ def resolve_entities(
     # them a merged shell with no recent data. Where the top name matches of a kind are
     # within a hair of each other, the question genuinely does not say which, so the
     # model is told to ask rather than to pick the one that sorted first.
+    #
+    # Every tied cluster, not only one at the top of the kind. A question naming
+    # several entities scores them on their own merits, so the ambiguous one sits
+    # wherever its score puts it: "roce for relaience, infosysis and tcs" ranked TCS
+    # 4.946 and Infosys 1.557 above four Reliance companies tied on 0.412, and a test
+    # that compared only the top two saw 1.557 against 4.946, called it no tie, and let
+    # the model pick a Reliance by itself — it chose Reliance Infrastructure, which
+    # answered the misspelling "relaience" with zeroes from the wrong company.
     tied: dict[str, list[EntityCandidate]] = {}
     for kind in {c.kind for c in named}:
         ranked = [c for c in named if c.kind == kind]
-        if len(ranked) >= 2 and ranked[0].score > 0 and ranked[1].score >= ranked[0].score * _TIE_RATIO:
-            tied[kind] = [c for c in ranked if c.score >= ranked[0].score * _TIE_RATIO][:_MAX_OPTIONS]
+        for pos, best in enumerate(ranked):
+            if best.score <= 0:
+                break
+            cluster = [c for c in ranked[pos:] if c.score >= best.score * _TIE_RATIO]
+            if len(cluster) >= 2:
+                tied[kind] = cluster[:_MAX_OPTIONS]
+                break
     tie_block = ""
     if tied:
         lines_ = "\n".join(f"- {kind}: " + ", ".join(c.name for c in cs) for kind, cs in tied.items())
@@ -715,7 +733,10 @@ def resolve_entities(
         # candidate the question names and the P entity it points back at. Ordered as
         # the model gave them, so "compare it with X" reads P first, X second.
         chosen = chosen_from(choice.get("chosen"))
-        resolution = EntityResolution(status="found", chosen=chosen)
+        # A P label is an entity carried from an earlier turn, so choosing one is the
+        # model saying this question continues that one.
+        picked_prior = {c.ident for c in prior} & {c.ident for c in chosen}
+        resolution = EntityResolution(status="found", chosen=chosen, follows_up=bool(picked_prior))
         if not chosen:
             status = "not_found"  # "found" but no valid label: ask the user instead of guessing
     if status == "ambiguous":

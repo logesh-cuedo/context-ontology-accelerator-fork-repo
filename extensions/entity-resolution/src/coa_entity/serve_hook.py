@@ -43,6 +43,41 @@ _CONFIG_TTL_S = 300.0
 _POINTER_TTL_S = 60.0
 
 
+def _follow_up_block(history: list[dict[str, str]] | None) -> str:
+    """What the previous turn asked and answered, for a question that continues it.
+
+    Tier 2 is given the question alone. A follow-up is written as the remainder of a
+    sentence — "and its roce?", "same for FY24" — so on its own it reads as a thin or
+    partial request, and the writer filled the gap from the only thing it could see:
+    it reproduced the previous answer, or answered both at once. Naming the previous
+    question and the columns it returned says which part is already done, so the
+    answer is the part that is not.
+
+    Only what is needed to draw that line: the question's words and its column
+    headings, not its rows.
+    """
+    asked = [t for t in (history or []) if t.get("role") == "user"]
+    answered = [t for t in (history or []) if t.get("role") == "assistant"]
+    previous = str(asked[-1].get("content") or "").strip() if asked else ""
+    columns = answered[-1].get("answered_columns") if answered else None
+    if not previous:
+        return ""
+    lines = [
+        "## This question continues the previous one",
+        f'The previous question was: "{previous[:300]}"',
+    ]
+    if isinstance(columns, list) and columns:
+        lines.append(f"It was answered with these columns: {', '.join(str(c) for c in columns)}.")
+    lines.append(
+        "Answer only what THIS question asks. It is phrased as a continuation, which "
+        "makes it read as the earlier question repeated — it is not. Carry over the "
+        "entities and the period, and change the measure to the one asked for now. Do "
+        "not return the previous answer again, and do not answer both unless this "
+        "question asks to compare them."
+    )
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class Tier2Outcome:
     """What serve does next: ask the user, or run Tier 2 with extra text in the SQL prompt."""
@@ -142,6 +177,9 @@ class EntityHook:
         if resolution.needs_clarification:
             return Tier2Outcome(clarification=resolution.clarification), step
         sections = [resolved_block(resolution, config) or fallback_rules(config)]
+        if resolution.follows_up and (continues := _follow_up_block(history)):
+            detail["follows_up"] = True
+            sections.append(continues)
         # The period, worked out here rather than left to the SQL writer. It is given the
         # question alone, so "that year" has nothing to resolve against and it counts back
         # from TODAY instead — FY26 for a conversation about FY25. The dates are arithmetic
