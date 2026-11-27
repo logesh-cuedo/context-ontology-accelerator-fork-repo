@@ -234,3 +234,20 @@ class TestSqlAuthoringTool:
         kwargs = generator.generate_from_context.await_args.kwargs
         assert kwargs["feedback"] == "prior attempt failed"
         assert kwargs["model_id"] == "model-x" and kwargs["dialect"] == "postgres"
+
+    @pytest.mark.asyncio
+    async def test_entity_filters_reach_the_writer(self):
+        # cuedo-ext: deep reasoning gives the writer the same resolved entity block as
+        # the standard path; none resolved -> an empty block.
+        catalog, _ = _catalog([_hit("orders")])
+        await catalog.search_tables("orders")
+        tool, generator = self._tool(catalog, entities="ENTITY FILTERS: sector IN ('Auto Ancillary')")
+        plain, plain_gen = self._tool(catalog)
+
+        await tool.generate_sql("q", ["orders"])
+        await plain.generate_sql("q", ["orders"])
+
+        assert generator.generate_from_context.await_args.kwargs["entities"] == (
+            "ENTITY FILTERS: sector IN ('Auto Ancillary')"
+        )
+        assert plain_gen.generate_from_context.await_args.kwargs["entities"] == ""

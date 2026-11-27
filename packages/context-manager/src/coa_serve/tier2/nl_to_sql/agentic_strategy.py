@@ -178,7 +178,10 @@ class AgenticStrategy:
         # writes SQL over that cache, and the execution primitive is the ONLY way
         # a statement reaches an engine.
         catalog = TableCatalog(self._vector, self._sql_generator.llm, namespace=namespace, index=index_name)
-        authoring = SqlAuthoringTool(self._sql_generator, catalog, model_id=context.model_id)
+        # cuedo-ext: the same entity filters the standard path gives its writer.
+        authoring = SqlAuthoringTool(
+            self._sql_generator, catalog, model_id=context.model_id, entities=options.get("resolvedEntities", "")
+        )
         graph = (
             OntologyGraphTool(self._graph_client, catalog, namespace=namespace)
             if (self._graph_client is not None and _graph_traversal_enabled(options))
@@ -190,7 +193,8 @@ class AgenticStrategy:
             execution=SqlExecutionService(self._firewall, self._query_executor),
             graph=graph,
             region=getattr(self._sql_generator.llm, "_region", None) or _DEFAULT_REGION,
-            model_id=context.model_id,
+            # cuedo-ext: serve's BEDROCK_MODEL_ID, not Strands' own default model.
+            model_id=context.model_id or getattr(self._sql_generator.llm, "model_id", None),
             prefetch_schemas=self._prefetch_schemas,
         )
 
