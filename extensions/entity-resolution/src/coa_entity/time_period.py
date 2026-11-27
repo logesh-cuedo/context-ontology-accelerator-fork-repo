@@ -45,6 +45,15 @@ _NEGATION = re.compile(
     r"|did\s*n[o\']?t|have\s*n[o\']?t|has\s*n[o\']?t|were\s*n[o\']?t|was\s*n[o\']?t|failed\s+to)\b",
     re.IGNORECASE,
 )
+# Where an exclusion ENDS: "have not grown in FY24, but did in FY25" — the period after
+# the contrast is one the answer must HAVE. Without it every period after the negation
+# was excluded, so FY25 was ruled out by the very question that asks for it.
+_CONTRAST = re.compile(r"\b(?:but\s+(?:did|does|do|has|have|had|was|were|is|are)|yet)\b", re.IGNORECASE)
+# A month named with a day is a calendar DAY, not a month: "January 15, 2020" read "15"
+# as the year 2015, and "1st April 2020" became a whole-month filter on a daily table.
+# Days are left to the SQL writer, which filters them on the table's date column.
+_DAY_BEFORE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?$", re.IGNORECASE)
+_DAY_AFTER = re.compile(r"\s*(?:st|nd|rd|th)?\s*,?\s*\d{4}\b", re.IGNORECASE)
 _NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 _FISCAL = r"(?:fy|fiscal(?:\s+year)?)\s*['’-]?\s*(?:(\d{2}|\d{4})\s*[-/–]\s*)?(\d{2}|\d{4})"
@@ -95,6 +104,7 @@ class Period:
 
     label: str
     condition: str
+    relative: bool = False  # counted back from the latest data ("last 8 quarters")
 
 
 # ── date helpers (a month is a (year, month) pair; YYYYMM = year * 100 + month) ──
@@ -177,6 +187,8 @@ def resolve_periods(query: str, spec: TimeSpec) -> list[Period]:
                     month = _MONTH_NUMBER.get(m.group(1).lower())
                     if not month:
                         continue  # e.g. "sales 2024": the first word is not a month
+                    if _DAY_BEFORE.search(text[:start]) or (len(m.group(2)) == 2 and _DAY_AFTER.match(text, end)):
+                        continue  # a calendar day, see _DAY_BEFORE
                     year = _full_year(m.group(2))
                     period = Period(f"{MONTH_NAMES[month]} {year}", f"{col} = {_yyyymm(year, month)}")
                 elif pattern is _NUMERIC_MONTH:
@@ -190,10 +202,13 @@ def resolve_periods(query: str, spec: TimeSpec) -> list[Period]:
                             f"last {n} quarters",
                             f"the {n} most recent quarter-end values of {col} present in the table "
                             f"({col} >= the {n}th-latest distinct {col})",
+                            relative=True,
                         )
                     else:
                         period = Period(
-                            f"last {n} fiscal years", f"the {n} most recent fiscal years: {col} > {latest} - {n}00"
+                            f"last {n} fiscal years",
+                            f"the {n} most recent fiscal years: {col} > {latest} - {n}00",
+                            relative=True,
                         )
                 elif pattern is _PREVIOUS_YEAR:
                     period = Period(
@@ -261,9 +276,16 @@ def split_periods(query: str, spec: TimeSpec) -> tuple[list[Period], list[Period
     cut = negated_from(query)
     if cut < 0:
         return resolve_periods(query, spec), []
-    required = resolve_periods(query[:cut], spec)
+    back = _CONTRAST.search(query, cut + 1)  # "..., but did in FY25": required again
+    stop = back.start() if back else len(query)
+    required = resolve_periods(query[:cut] + " " + query[stop:], spec)
     keys = {p.condition for p in required}
-    excluded = [p for p in resolve_periods(query[cut:], spec) if p.condition not in keys]
+    # A relative window is not excluded: in "not grown in the last eight quarters, but
+    # did in the latest quarter" the eight are counted back from the latest quarter,
+    # which this module cannot see, and excluding the 8 latest would rule out the very
+    # quarter the question asks for. It is left to the SQL writer, which has the question.
+    negated = resolve_periods(query[cut:stop], spec)
+    excluded = [p for p in negated if p.condition not in keys and not p.relative]
     return required, excluded
 
 
@@ -286,8 +308,13 @@ def carried_period(query: str, history: list[dict[str, str]] | None, spec: TimeS
     cuts a multi-year answer down to the one year the previous question asked about.
     Those stand down and leave the window to the SQL writer.
     """
-    if own := resolve_periods(query, spec):
+    if own := split_periods(query, spec)[0]:
         return own
+    # It names periods, but split_periods ruled them out or left them to the writer
+    # ("not ... in the last eight quarters, but did in the latest quarter"). Reading the
+    # whole question again would bring them back as periods to filter ON.
+    if resolve_periods(query, spec):
+        return []
     if _SPANS_TIME.search(query):
         return []
     if _NEGATION.search(query):  # "but not in FY25" alone: the exclusion is the question
