@@ -468,6 +468,14 @@ def _selection_prompt(
         "names, acronyms (TCS → Tata Consultancy Services, L&T → Larsen & Toubro), missing "
         "suffixes (Ltd, Limited) and small typos still count as a match. Choose every entity "
         "the question names, of every kind.\n"
+        "  A typo is still only the word it misspells. Where the user writes ONE word and "
+        "a candidate is that word plus further words of its own (a line of business, a "
+        "place, a group member), the candidate is not what they wrote: the extra words are "
+        "the part that picks one company out of a family sharing the first word, and the "
+        "user supplied none of it. Such a candidate being the only one of its family listed "
+        "is a fact about what the search returned, not about which the user meant — the "
+        'others exist and simply did not score. Report "not_found" and name the word they '
+        "wrote, so they are shown that family and choose within it.\n"
         '- "ambiguous": a name in the question fits two or more candidates and nothing in the '
         'question decides between them (e.g. "Bajaj" with Bajaj Auto and Bajaj Finance listed). '
         "This includes candidates that are the same name plus a suffix or code — those are "
@@ -479,7 +487,14 @@ def _selection_prompt(
         'whole question, so report "ambiguous" and ALSO put every entity you did settle '
         'in "chosen". Leaving them out drops them from the answer: a two-company question '
         "comes back about one company.\n"
-        '- "not_found": the question names an entity that matches NO candidate.\n\n'
+        '- "not_found": the question names an entity that no candidate IS. A list that '
+        "offers only near misses is not a match: one candidate left standing is not the "
+        "same as one candidate that fits, and the search returns whatever is closest "
+        "whether or not anything is close. Say not_found and name the entity in "
+        '"mention" — the user is then shown the near misses and picks, which is right '
+        "even when one of them turns out to be what they meant. Choosing it for them is "
+        "wrong whenever it is not: the answer comes back as another company's numbers "
+        "under the name the user asked for, and nothing on screen says so.\n\n"
         f"{group_rules}"
         f"{carry_over_rule}"
         f"{clarification_rule}"
